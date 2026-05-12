@@ -29,6 +29,12 @@ pub enum AgentEvent {
         input_tokens: u64,
         output_tokens: u64,
     },
+    /// Emitted when a subagent JSONL contains an init record linking it to a parent session.
+    /// Format: {"subtype": "init", "session_id": "...", "parent_session_id": "..."}
+    SubagentInit {
+        session_id: String,
+        parent_session_id: Option<String>,
+    },
 }
 
 /// A parsed line enriched with its session context.
@@ -63,6 +69,26 @@ fn parse_event(line: &str) -> AgentEvent {
     }
 
     if let Some(subtype) = v.get("subtype").and_then(Value::as_str) {
+        // P3: detect subagent init records that link a subagent to its parent session.
+        // Format: {"subtype": "init", "session_id": "...", "parent_session_id": "..."}
+        if subtype == "init" {
+            let sid = v
+                .get("session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            let parent_sid = v
+                .get("parent_session_id")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            // Only emit SubagentInit when we have at least one session id field,
+            // distinguishing it from other "init" subtypes (e.g. Claude Code system init).
+            if sid.is_some() || parent_sid.is_some() {
+                return AgentEvent::SubagentInit {
+                    session_id: sid.unwrap_or_default(),
+                    parent_session_id: parent_sid,
+                };
+            }
+        }
         return AgentEvent::System {
             subtype: subtype.to_owned(),
             data: v.clone(),
@@ -235,6 +261,43 @@ mod tests {
         match parsed.event {
             AgentEvent::Text { content } => assert_eq!(content, "Bonjour"),
             other => panic!("Expected Text for string content, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_subagent_init_with_parent() {
+        let line = r#"{"subtype":"init","session_id":"sub-abc","parent_session_id":"parent-xyz"}"#;
+        let parsed = parse_line("sub-abc", line).expect("should parse");
+        match parsed.event {
+            AgentEvent::SubagentInit { session_id, parent_session_id } => {
+                assert_eq!(session_id, "sub-abc");
+                assert_eq!(parent_session_id, Some("parent-xyz".to_owned()));
+            }
+            other => panic!("Expected SubagentInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_subagent_init_without_parent() {
+        let line = r#"{"subtype":"init","session_id":"sub-abc"}"#;
+        let parsed = parse_line("sub-abc", line).expect("should parse");
+        match parsed.event {
+            AgentEvent::SubagentInit { session_id, parent_session_id } => {
+                assert_eq!(session_id, "sub-abc");
+                assert_eq!(parent_session_id, None);
+            }
+            other => panic!("Expected SubagentInit, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_generic_init_without_session_fields_stays_system() {
+        // An init subtype without session_id or parent_session_id stays as System
+        let line = r#"{"subtype":"init","some_other":"field"}"#;
+        let parsed = parse_line("sess-1", line).expect("should parse");
+        match parsed.event {
+            AgentEvent::System { subtype, .. } => assert_eq!(subtype, "init"),
+            other => panic!("Expected System, got {other:?}"),
         }
     }
 }

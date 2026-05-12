@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+﻿use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -27,7 +27,7 @@ pub fn start_watcher(app: AppHandle, registry: SessionRegistry) -> crate::error:
     let projects_root = home.join(".claude").join("projects");
 
     if !projects_root.exists() {
-        warn!("~/.claude/projects does not exist — watcher not started");
+        warn!("~/.claude/projects does not exist - watcher not started");
         return Ok(());
     }
 
@@ -309,8 +309,53 @@ fn process_jsonl_file(
         }
     };
 
+    // P3: Resolve parent agent id from path if this is a subagent file.
+    // Subagent paths look like: <projects_root>/<project>/<parent_uuid>/subagents/<file>.jsonl
+    // The parent_session_id is the directory that contains the "subagents" folder.
+    let path_parent_session_id: Option<String> = {
+        // Walk up: file -> subagents dir -> parent_uuid dir
+        path.parent() // subagents/
+            .and_then(|p| {
+                if p.file_name().and_then(|n| n.to_str()) == Some("subagents") {
+                    p.parent() // parent_uuid dir
+                        .and_then(|pp| pp.file_name())
+                        .and_then(|n| n.to_str())
+                        .map(str::to_owned)
+                } else {
+                    None
+                }
+            })
+    };
+
     for line in complete_lines {
         if let Some(parsed) = parse_line(&session_id, line) {
+            // P3: handle SubagentInit - emit agentTeamInfo linking sub-agent to parent.
+            if let AgentEvent::SubagentInit { parent_session_id, .. } = &parsed.event {
+                // Prefer explicit parent from JSONL, fall back to path-derived parent.
+                let effective_parent = parent_session_id
+                    .as_deref()
+                    .or(path_parent_session_id.as_deref());
+                if let Some(parent_sid) = effective_parent {
+                    let parent_agent_id = session_to_agent
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .get(parent_sid)
+                        .copied();
+                    if let Some(lead_id) = parent_agent_id {
+                        let team_msg = json!({
+                            "type": "agentTeamInfo",
+                            "id": agent_id,
+                            "isTeamLead": false,
+                            "leadAgentId": lead_id,
+                        });
+                        if let Err(e) = app.emit("agent-event", &team_msg) {
+                            warn!("Failed to emit agentTeamInfo: {e}");
+                        }
+                    }
+                }
+                continue; // SubagentInit has no other frontend messages
+            }
+
             let messages = translate_to_frontend_messages(&parsed.event, agent_id);
             for msg in messages {
                 if let Err(e) = app.emit("agent-event", &msg) {

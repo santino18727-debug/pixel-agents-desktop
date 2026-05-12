@@ -7,29 +7,46 @@ const STORE_FILE: &str = "settings.json";
 const SETTINGS_KEY: &str = "settings";
 
 /// Persisted application settings.
+/// All fields map to camelCase for the frontend protocol.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Settings {
-    #[serde(default = "default_watch_all")]
-    pub watch_all: bool,
-    #[serde(default = "default_theme")]
-    pub theme: String,
+    /// Whether UI sounds are enabled (maps to soundEnabled on the frontend).
+    #[serde(default)]
+    pub sound_enabled: bool,
+
+    /// When true the watcher tracks all sessions, not just the active one.
+    /// Maps to watchAllSessions on the frontend.
+    #[serde(default = "default_watch_all_sessions")]
+    pub watch_all_sessions: bool,
+
+    /// Always show agent name labels above characters.
+    #[serde(default)]
+    pub always_show_labels: bool,
+
+    /// Keep the window floating above all other windows.
     #[serde(default)]
     pub always_on_top: bool,
+
+    /// Visual theme ("dark" | "light").
+    #[serde(default = "default_theme")]
+    pub theme: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            watch_all: default_watch_all(),
-            theme: default_theme(),
+            sound_enabled: false,
+            watch_all_sessions: default_watch_all_sessions(),
+            always_show_labels: false,
             always_on_top: false,
+            theme: default_theme(),
         }
     }
 }
 
-fn default_watch_all() -> bool {
-    false
+fn default_watch_all_sessions() -> bool {
+    true
 }
 
 fn default_theme() -> String {

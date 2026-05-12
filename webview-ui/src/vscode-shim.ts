@@ -4,6 +4,8 @@
  * Additions vs original:
  *  - P1: load_layout command invoked at bootstrap (persisted layout takes priority over default)
  *  - P1: saveLayout postMessage case added to handleOutboundMessage -> invoke save_layout
+ *  - P2: workspaceFolders dispatched after existingAgents so frontend shows folder names
+ *  - P3: get_settings invoked in parallel at bootstrap; values merged with hardcoded defaults
  */
 
 function dispatch(data: unknown): void {
@@ -44,6 +46,16 @@ async function bootstrap(): Promise<void> {
       modified_secs: number;
     };
 
+    type PersistedSettings = {
+      soundEnabled?: boolean;
+      watchAllSessions?: boolean;
+      alwaysShowLabels?: boolean;
+      alwaysOnTop?: boolean;
+      extensionVersion?: string;
+      lastSeenVersion?: string;
+      externalAssetDirectories?: string[];
+    };
+
     const sessionPromise: Promise<SessionRecord[]> = isTauri
       ? import("@tauri-apps/api/core").then(({ invoke }) =>
           invoke<SessionRecord[]>("list_sessions", { maxAgeHours: 24, limit: 20 }).catch(() => []),
@@ -57,7 +69,14 @@ async function bootstrap(): Promise<void> {
         )
       : Promise.resolve(null);
 
-    const [characters, floors, walls, furniture, furnitureCatalog, defaultLayout, sessions, persistedLayout] =
+    // P3: Load persisted settings from Rust backend (returns null/empty if not yet stored).
+    const settingsPromise: Promise<PersistedSettings | null> = isTauri
+      ? import("@tauri-apps/api/core").then(({ invoke }) =>
+          invoke<PersistedSettings>("get_settings").catch(() => null),
+        )
+      : Promise.resolve(null);
+
+    const [characters, floors, walls, furniture, furnitureCatalog, defaultLayout, sessions, persistedLayout, persistedSettings] =
       await Promise.all([
         fetchJson<unknown>("/assets/decoded/characters.json"),
         fetchJson<unknown>("/assets/decoded/floors.json"),
@@ -67,6 +86,7 @@ async function bootstrap(): Promise<void> {
         fetchJson<unknown>("/assets/default-layout-1.json").catch(() => null),
         sessionPromise,
         persistedLayoutPromise,
+        settingsPromise,
       ]);
 
     dispatch({ type: "characterSpritesLoaded", characters });
@@ -92,20 +112,36 @@ async function bootstrap(): Promise<void> {
         agentMeta: {},
         folderNames,
       });
+      // P2: dispatch workspaceFolders so the frontend can display folder names per agent.
+      dispatch({
+        type: "workspaceFolders",
+        folders: mainSessions.map((s) => ({
+          name: s.folder_name || s.project_dir.split(/[\/]/).pop() || s.project_dir,
+          path: s.project_dir,
+        })),
+      });
     }
 
     // P1: Use persisted layout if available, otherwise fall back to default layout.
     const layoutToLoad = persistedLayout ?? defaultLayout;
     dispatch({ type: "layoutLoaded", layout: layoutToLoad, wasReset: false });
 
-    dispatch({
-      type: "settingsLoaded",
+    // P3: Hardcoded defaults, overridden by any values returned from get_settings.
+    const settingsDefaults: PersistedSettings = {
       soundEnabled: false,
       watchAllSessions: true,
       alwaysOnTop: false,
       extensionVersion: "0.1.0",
       lastSeenVersion: "",
       externalAssetDirectories: [],
+    };
+    const mergedSettings = persistedSettings
+      ? { ...settingsDefaults, ...persistedSettings }
+      : settingsDefaults;
+
+    dispatch({
+      type: "settingsLoaded",
+      ...mergedSettings,
     });
 
     if (isTauri) {
