@@ -85,7 +85,7 @@ function browserMockAssetsPlugin(): Plugin {
         }
       });
     },
-    // Build output includes lightweight metadata consumed by browser runtime.
+    // Build output includes all assets consumed by the production webview.
     closeBundle() {
       fs.mkdirSync(distAssetsDir, { recursive: true });
 
@@ -94,6 +94,27 @@ function browserMockAssetsPlugin(): Plugin {
       fs.writeFileSync(
         path.join(distAssetsDir, 'asset-index.json'),
         JSON.stringify(buildAssetIndex(assetsDir)),
+      );
+
+      // Write pre-decoded sprite JSON files so the production binary has the
+      // same data the dev middleware serves on-the-fly.
+      const decodedDir = path.join(distAssetsDir, 'decoded');
+      fs.mkdirSync(decodedDir, { recursive: true });
+      fs.writeFileSync(
+        path.join(decodedDir, 'characters.json'),
+        JSON.stringify(decodeAllCharacters(assetsDir)),
+      );
+      fs.writeFileSync(
+        path.join(decodedDir, 'floors.json'),
+        JSON.stringify(decodeAllFloors(assetsDir)),
+      );
+      fs.writeFileSync(
+        path.join(decodedDir, 'walls.json'),
+        JSON.stringify(decodeAllWalls(assetsDir)),
+      );
+      fs.writeFileSync(
+        path.join(decodedDir, 'furniture.json'),
+        JSON.stringify(decodeAllFurniture(assetsDir, catalog)),
       );
     },
   };
