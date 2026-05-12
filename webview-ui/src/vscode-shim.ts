@@ -1,169 +1,179 @@
 /**
  * Tauri shim — bridges the VS Code extension message protocol to Tauri IPC.
  *
- * Imported as the very first line of main.tsx when running inside Tauri.
- * Must execute before React bootstraps so the message handler is ready.
- *
  * Strategy:
- *  - Detect Tauri by checking window.__TAURI_INTERNALS__
- *  - Override vscodeApi.ts's acquireVsCodeApi path via monkey-patching
- *    the global window object so runtime.ts sees it as 'vscode' runtime
- *  - Translate outbound postMessage calls into Tauri invoke() calls
- *  - Subscribe to Tauri events and re-dispatch them as MessageEvent on window
+ *  1. Always install acquireVsCodeApi so runtime.ts sees 'vscode' runtime
+ *  2. Fetch decoded assets from Vite dev server (same endpoints as browserMock)
+ *  3. Fetch sessions from Rust backend in parallel with assets (Tauri only)
+ *  4. Dispatch sprite → existingAgents → layoutLoaded in correct order so agents
+ *     are buffered in pendingAgents before layout builds seats
+ *  5. Subscribe to Tauri events for live session updates
  */
 
-// Only activate inside Tauri webview
+function dispatch(data: unknown): void {
+  window.dispatchEvent(new MessageEvent('message', { data }));
+}
+
+// ── 1. Always install acquireVsCodeApi ─────────────────────────────────────
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(window as any).acquireVsCodeApi = () => ({
+  postMessage: handleOutboundMessage,
+});
+
+// Detect Tauri context (for live events only — assets always fetched from Vite)
 const isTauri =
   typeof window !== 'undefined' &&
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   typeof (window as any).__TAURI_INTERNALS__ !== 'undefined';
 
-if (isTauri) {
-  installTauriShim();
+// Bootstrap AFTER React mounts and useExtensionMessages registers its listener.
+// Double-RAF ensures two render frames have passed (mount + effects).
+let bootstrapScheduled = false;
+function scheduleBootstrap(): void {
+  if (bootstrapScheduled) return;
+  bootstrapScheduled = true;
+  requestAnimationFrame(() => requestAnimationFrame(() => void bootstrap()));
 }
 
-function installTauriShim(): void {
-  // ── 1. Pretend acquireVsCodeApi exists so runtime.ts detects 'vscode' runtime ──
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (window as any).acquireVsCodeApi = () => ({
-    postMessage: handleOutboundMessage,
-  });
-
-  // ── 2. Subscribe to Tauri events and forward them as window MessageEvents ──
-  void subscribeToTauriEvents();
+window.addEventListener('DOMContentLoaded', scheduleBootstrap);
+if (document.readyState !== 'loading') {
+  scheduleBootstrap();
 }
 
-/**
- * Translate postMessage calls from the webview into Tauri invoke() calls.
- */
-async function handleOutboundMessage(msg: unknown): Promise<void> {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { invoke } = await import('@tauri-apps/api/core');
-  const m = msg as { type?: string; [key: string]: unknown };
-
-  switch (m.type) {
-    case 'webviewReady':
-      // No-op — Tauri doesn't need an explicit ready signal
-      break;
-
-    case 'getSettings':
-      try {
-        const settings = await invoke('get_settings');
-        dispatchToWindow({ type: 'settingsLoaded', ...Object(settings) });
-      } catch (e) {
-        console.error('[Tauri shim] get_settings failed:', e);
-      }
-      break;
-
-    case 'updateSettings':
-      try {
-        await invoke('set_settings', { settings: m.settings });
-      } catch (e) {
-        console.error('[Tauri shim] set_settings failed:', e);
-      }
-      break;
-
-    case 'watchSession':
-      // Phase 2 — no-op in Phase 0/1
-      break;
-
-    case 'watchAll':
-      try {
-        await invoke('set_settings', {
-          settings: { watchAll: true, theme: 'dark', alwaysOnTop: false },
-        });
-      } catch (e) {
-        console.error('[Tauri shim] set_watch_all failed:', e);
-      }
-      break;
-
-    default:
-      // Forward unknown messages as-is for future extensibility
-      console.debug('[Tauri shim] Unhandled postMessage:', m.type);
-  }
-}
-
-/**
- * Subscribe to Tauri events that replace the VS Code extension push messages.
- */
-async function subscribeToTauriEvents(): Promise<void> {
+// ── 2. Bootstrap: load assets + sessions, then unlock UI ──────────────────
+async function bootstrap(): Promise<void> {
   try {
-    const { listen } = await import('@tauri-apps/api/event');
+    // Fetch sessions from Rust backend in parallel with sprite assets so we can
+    // dispatch existingAgents BEFORE layoutLoaded (agents get buffered into
+    // pendingAgents and receive correct seat assignment when layout arrives).
+    type SessionRecord = {
+      session_id: string;
+      project_dir: string;
+      /** Human-readable project name, decoded from Claude Code path encoding. */
+      folder_name: string;
+      is_subagent: boolean;
+      jsonl_path: string;
+      modified_secs: number;
+    };
 
-    // File watcher parsed events → re-dispatch as window messages
-    await listen<unknown>('agent-event', (event) => {
-      dispatchToWindow(event.payload);
+    const sessionPromise: Promise<SessionRecord[]> = isTauri
+      ? import('@tauri-apps/api/core').then(({ invoke }) =>
+          invoke<SessionRecord[]>('list_sessions', { maxAgeHours: 4, limit: 10 }).catch(() => []),
+        )
+      : Promise.resolve([]);
+
+    // Load decoded sprite assets from Vite middleware endpoints.
+    // Order: characterSpritesLoaded → floorTilesLoaded →
+    //        wallTilesLoaded → furnitureAssetsLoaded → existingAgents → layoutLoaded
+    const [characters, floors, walls, furniture, furnitureCatalog, defaultLayout, sessions] =
+      await Promise.all([
+        fetchJson<unknown>('/assets/decoded/characters.json'),
+        fetchJson<unknown>('/assets/decoded/floors.json'),
+        fetchJson<unknown>('/assets/decoded/walls.json'),
+        fetchJson<unknown>('/assets/decoded/furniture.json'),
+        fetchJson<unknown>('/assets/furniture-catalog.json').catch(() => []),
+        fetchJson<unknown>('/assets/default-layout-1.json').catch(() => null),
+        sessionPromise,
+      ]);
+
+    dispatch({ type: 'characterSpritesLoaded', characters });
+    dispatch({ type: 'floorTilesLoaded', sprites: floors });
+    dispatch({ type: 'wallTilesLoaded', sets: walls });
+
+    // furnitureAssetsLoaded expects { catalog: CatalogEntry[], sprites: Record<string, string[][]> }
+    dispatch({
+      type: 'furnitureAssetsLoaded',
+      catalog: furnitureCatalog,
+      sprites: furniture,
     });
 
-    // Settings changed externally (e.g. from another window)
-    await listen<unknown>('settings-changed', (event) => {
-      dispatchToWindow({ type: 'settingsLoaded', ...Object(event.payload) });
-    });
+    // Dispatch existingAgents BEFORE layoutLoaded so the handler buffers them
+    // into pendingAgents — they are flushed with correct seat assignment when
+    // layoutLoaded fires below.
+    const mainSessions = sessions.filter((s) => !s.is_subagent);
+    if (mainSessions.length > 0) {
+      const agentIds = mainSessions.map((_, i) => i + 1);
+      const folderNames: Record<number, string> = {};
+      mainSessions.forEach((s, i) => {
+        // folder_name is decoded by the Rust backend (Claude Code path encoding -> readable name)
+        folderNames[i + 1] = s.folder_name || s.project_dir.split(/[\/]/).pop() || s.project_dir;
+      });
+      dispatch({
+        type: 'existingAgents',
+        agents: agentIds,
+        agentMeta: {},
+        folderNames,
+      });
+    }
 
-    // Session list refresh
-    await listen<unknown>('update-agents', (event) => {
-      dispatchToWindow(event.payload);
-    });
+    // layoutLoaded with default layout JSON → renders furniture + flushes pending agents
+    dispatch({ type: 'layoutLoaded', layout: defaultLayout, wasReset: false });
 
-    // On ready: fetch initial settings and sessions
-    await bootstrapInitialState();
-  } catch (e) {
-    console.error('[Tauri shim] Failed to subscribe to Tauri events:', e);
-  }
-}
-
-/**
- * Fetch initial state from Rust backend and dispatch to the webview.
- * Called once after event listeners are registered.
- */
-async function bootstrapInitialState(): Promise<void> {
-  try {
-    const { invoke } = await import('@tauri-apps/api/core');
-
-    const settings = await invoke<{
-      watchAll: boolean;
-      theme: string;
-      alwaysOnTop: boolean;
-    }>('get_settings').catch(() => ({
-      watchAll: false,
-      theme: 'dark',
-      alwaysOnTop: false,
-    }));
-
-    dispatchToWindow({
+    dispatch({
       type: 'settingsLoaded',
       soundEnabled: false,
-      watchAllSessions: settings.watchAll,
-      alwaysOnTop: settings.alwaysOnTop,
+      watchAllSessions: true,
+      alwaysOnTop: false,
       extensionVersion: '0.1.0',
       lastSeenVersion: '',
       externalAssetDirectories: [],
     });
 
-    const sessions = await invoke<
-      Array<{
-        session_id: string;
-        project_dir: string;
-        is_subagent: boolean;
-        jsonl_path: string;
-      }>
-    >('list_sessions').catch(() => []);
-
-    if (sessions.length > 0) {
-      dispatchToWindow({
-        type: 'existingAgents',
-        agents: sessions
-          .filter((s) => !s.is_subagent)
-          .map((_, i) => i + 1),
-        agentMeta: {},
-        folderNames: {},
-      });
+    // Subscribe to live Tauri events (new sessions, JSONL updates)
+    if (isTauri) {
+      await subscribeTauriEvents();
     }
   } catch (e) {
     console.error('[Tauri shim] Bootstrap failed:', e);
+    // Fallback: unlock UI with empty layout so user sees something
+    dispatch({ type: 'layoutLoaded', layout: null, wasReset: false });
   }
 }
 
-function dispatchToWindow(data: unknown): void {
-  window.dispatchEvent(new MessageEvent('message', { data }));
+async function fetchJson<T>(url: string): Promise<T> {
+  const res = await fetch(url);
+  if (!res.ok) throw new Error(`HTTP ${res.status} for ${url}`);
+  return res.json() as Promise<T>;
+}
+
+// ── 3. Subscribe to Tauri events for live updates ─────────────────────────
+async function subscribeTauriEvents(): Promise<void> {
+  try {
+    const { listen } = await import('@tauri-apps/api/event');
+    await listen<unknown>('agent-event', (event) => dispatch(event.payload));
+    await listen<unknown>('settings-changed', (event) =>
+      dispatch({ type: 'settingsLoaded', ...Object(event.payload) }),
+    );
+    await listen<unknown>('update-agents', (event) => dispatch(event.payload));
+  } catch (e) {
+    console.error('[Tauri shim] subscribeTauriEvents failed:', e);
+  }
+}
+
+// ── 4. Handle outbound postMessage from webview ───────────────────────────
+async function handleOutboundMessage(msg: unknown): Promise<void> {
+  const m = msg as { type?: string; [key: string]: unknown };
+
+  if (!isTauri) {
+    console.debug('[Tauri shim] postMessage (no Tauri):', m.type);
+    return;
+  }
+
+  try {
+    const { invoke } = await import('@tauri-apps/api/core');
+    switch (m.type) {
+      case 'getSettings': {
+        const settings = await invoke('get_settings').catch(() => ({}));
+        dispatch({ type: 'settingsLoaded', ...Object(settings) });
+        break;
+      }
+      case 'updateSettings':
+        await invoke('set_settings', { settings: m.settings }).catch(() => {});
+        break;
+      default:
+        console.debug('[Tauri shim] Unhandled postMessage:', m.type);
+    }
+  } catch (e) {
+    console.error('[Tauri shim] handleOutboundMessage failed:', e);
+  }
 }

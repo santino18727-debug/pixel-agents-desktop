@@ -1,5 +1,6 @@
-use std::path::PathBuf;
+﻿use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use std::time::SystemTime;
 
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
@@ -11,8 +12,14 @@ use crate::error::Result;
 pub struct SessionMeta {
     pub session_id: String,
     pub project_dir: String,
+    /// Human-readable project folder name, decoded from Claude Code encoding.
+    /// Claude Code encodes path separators as  in the directory name stored
+    /// under ~/.claude/projects/ (e.g.  -> ).
+    pub folder_name: String,
     pub is_subagent: bool,
     pub jsonl_path: String,
+    /// Unix timestamp (seconds) of last modification, or 0 if unavailable.
+    pub modified_secs: u64,
 }
 
 /// Shared, thread-safe session registry.
@@ -22,9 +29,30 @@ pub fn new_registry() -> SessionRegistry {
     Arc::new(Mutex::new(Vec::new()))
 }
 
-/// Walk `~/.claude/projects/` and collect all `.jsonl` session files.
+/// Decode a Claude Code project directory name to a human-readable folder name.
 ///
-/// Sub-agent sessions live under `<project_dir>/subagents/`.
+/// Claude Code stores sessions under ~/.claude/projects/<encoded-path>/ where
+/// the path separators (/ and \) are replaced by . For example:
+///     ->  
+///     ->  
+///
+/// Strategy: split on  (the separator), take the last non-empty segment.
+/// Trade-off: folder names that legitimately contain  will be truncated.
+pub fn decode_folder_name(encoded: &str) -> String {
+    // Split on the double-dash separator used by Claude Code for path components
+    let parts: Vec<&str> = encoded.split("--").collect();
+    // The last part is the actual folder name (rightmost path component)
+    parts
+        .into_iter()
+        .rev()
+        .find(|s| !s.is_empty())
+        .unwrap_or(encoded)
+        .to_owned()
+}
+
+/// Walk  and collect all  session files.
+///
+/// Sub-agent sessions live under .
 /// Returns an error only if the home directory cannot be resolved.
 pub fn scan_projects() -> Result<Vec<SessionMeta>> {
     let home = dirs::home_dir().ok_or_else(|| {
@@ -56,13 +84,16 @@ pub fn scan_projects() -> Result<Vec<SessionMeta>> {
         sessions.push(meta);
     }
 
+    // Sort by most recently modified first
+    sessions.sort_by(|a, b| b.modified_secs.cmp(&a.modified_secs));
+
     Ok(sessions)
 }
 
 fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> Option<SessionMeta> {
     let session_id = jsonl_path.file_stem()?.to_str()?.to_owned();
 
-    // Determine if this is a sub-agent by checking whether `subagents` appears
+    // Determine if this is a sub-agent by checking whether  appears
     // in the path components between the projects root and the file.
     let rel = jsonl_path.strip_prefix(projects_root).ok()?;
     let components: Vec<&str> = rel
@@ -73,22 +104,84 @@ fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> 
     // components[0] = project dirname, components[1] = file or "subagents", ...
     let is_subagent = components.contains(&"subagents");
 
-    let project_dir = if let Some(first) = components.first() {
-        projects_root.join(first).to_string_lossy().into_owned()
-    } else {
-        return None;
-    };
+    let encoded_dir_name = components.first()?.to_string();
+
+    let project_dir = projects_root
+        .join(&encoded_dir_name)
+        .to_string_lossy()
+        .into_owned();
+
+    // Decode the Claude Code encoded directory name to a human-readable folder name
+    let folder_name = decode_folder_name(&encoded_dir_name);
+
+    // Get file modification time as Unix seconds
+    let modified_secs = std::fs::metadata(jsonl_path)
+        .ok()
+        .and_then(|m| m.modified().ok())
+        .and_then(|t| t.duration_since(SystemTime::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
 
     Some(SessionMeta {
         session_id,
         project_dir,
+        folder_name,
         is_subagent,
         jsonl_path: jsonl_path.to_string_lossy().into_owned(),
+        modified_secs,
     })
 }
 
-/// Tauri command — returns the current snapshot of known sessions.
+/// Tauri command -- returns sessions modified within the last  hours.
+/// Defaults to 24h. Returns at most  sessions (default 20).
 #[tauri::command]
-pub fn list_sessions(registry: tauri::State<'_, SessionRegistry>) -> Vec<SessionMeta> {
-    registry.lock().unwrap_or_else(|e| e.into_inner()).clone()
+pub fn list_sessions(
+    registry: tauri::State<'_, SessionRegistry>,
+    max_age_hours: Option<u64>,
+    limit: Option<usize>,
+) -> Vec<SessionMeta> {
+    let max_age = max_age_hours.unwrap_or(24);
+    let limit = limit.unwrap_or(20);
+
+    let cutoff = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|d| d.as_secs().saturating_sub(max_age * 3600))
+        .unwrap_or(0);
+
+    registry
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .filter(|s| s.modified_secs >= cutoff)
+        .take(limit)
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn decode_folder_name_simple() {
+        // C--Dev-pixel-agents-desktop -> pixel-agents-desktop
+        assert_eq!(decode_folder_name("C--Dev-pixel-agents-desktop"), "Dev-pixel-agents-desktop");
+    }
+
+    #[test]
+    fn decode_folder_name_deep_path() {
+        // C--Dev--projects--my-app -> my-app
+        assert_eq!(decode_folder_name("C--Dev--projects--my-app"), "my-app");
+    }
+
+    #[test]
+    fn decode_folder_name_single_segment() {
+        // No double-dash: return as-is
+        assert_eq!(decode_folder_name("myapp"), "myapp");
+    }
+
+    #[test]
+    fn decode_folder_name_station_math() {
+        assert_eq!(decode_folder_name("C--Dev-station-math-app"), "Dev-station-math-app");
+    }
 }

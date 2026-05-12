@@ -8,6 +8,8 @@ use file_watcher::start_watcher;
 use session_registry::{list_sessions, new_registry, scan_projects};
 use settings::{get_settings, set_settings};
 
+use tauri::Manager;
+use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 use tracing::error;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -23,6 +25,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(registry.clone())
         .invoke_handler(tauri::generate_handler![
             list_sessions,
@@ -30,6 +33,14 @@ pub fn run() {
             set_settings,
         ])
         .setup(move |app| {
+            // Restore saved window size and position (tauri-plugin-window-state).
+            // Must be called after the plugin is registered and the window exists.
+            if let Some(window) = app.get_webview_window("main") {
+                if let Err(e) = window.restore_state(StateFlags::SIZE | StateFlags::POSITION) {
+                    tracing::warn!("Could not restore window state: {e}");
+                }
+            }
+
             // Initial project scan
             match scan_projects() {
                 Ok(sessions) => {
@@ -37,6 +48,21 @@ pub fn run() {
                     *reg = sessions;
                 }
                 Err(e) => error!("Initial scan failed: {e}"),
+            }
+
+            // Persist window size/position on every resize or move so state is
+            // saved even when the process is killed (e.g. `tauri dev` hot-reload).
+            let save_handle = app.handle().clone();
+            if let Some(window) = app.get_webview_window("main") {
+                window.on_window_event(move |event| {
+                    if matches!(
+                        event,
+                        tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
+                    ) {
+                        let _ = save_handle
+                            .save_window_state(StateFlags::SIZE | StateFlags::POSITION);
+                    }
+                });
             }
 
             // Start filesystem watcher

@@ -1,4 +1,4 @@
-use serde::{Deserialize, Serialize};
+﻿use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Parsed representation of a single JSONL agent event.
@@ -34,17 +34,14 @@ pub struct ParsedLine {
     pub event: AgentEvent,
 }
 
-/// Attempt to parse one JSONL line into a `ParsedLine`.
-///
-/// Never panics — unknown or malformed lines become `AgentEvent::Raw`.
+/// Attempt to parse one JSONL line into a ParsedLine.
+/// Never panics -- unknown or malformed lines become AgentEvent::Raw.
 pub fn parse_line(session_id: &str, line: &str) -> Option<ParsedLine> {
     let trimmed = line.trim();
     if trimmed.is_empty() {
         return None;
     }
-
     let event = parse_event(trimmed);
-
     Some(ParsedLine {
         session_id: session_id.to_owned(),
         event,
@@ -53,19 +50,14 @@ pub fn parse_line(session_id: &str, line: &str) -> Option<ParsedLine> {
 
 fn parse_event(line: &str) -> AgentEvent {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
-        return AgentEvent::Raw {
-            raw: line.to_owned(),
-        };
+        return AgentEvent::Raw { raw: line.to_owned() };
     };
 
-    // Try to extract from assistant/user message wrapper first
     let content_block = extract_content_block(&v);
-
     if let Some(block) = content_block {
         return block;
     }
 
-    // Try system record
     if let Some(subtype) = v.get("subtype").and_then(Value::as_str) {
         return AgentEvent::System {
             subtype: subtype.to_owned(),
@@ -73,21 +65,21 @@ fn parse_event(line: &str) -> AgentEvent {
         };
     }
 
-    AgentEvent::Raw {
-        raw: line.to_owned(),
-    }
+    AgentEvent::Raw { raw: line.to_owned() }
 }
 
+/// Extract a content block from a Claude Code JSONL envelope.
+///
+/// Real Claude Code format observed in ~/.claude/projects/:
+///   { "type": "assistant", "message": { "role": "assistant", "content": [...] }, ... }
+///
+/// FIX: The previous implementation matched v.get("role") at root, but Claude Code
+/// places "role" inside "message", not at the envelope root. The root field is "type".
 fn extract_content_block(v: &Value) -> Option<AgentEvent> {
-    let role = v.get("role").and_then(Value::as_str)?;
+    let msg_type = v.get("type").and_then(Value::as_str)?;
 
-    match role {
-        "assistant" => {
-            // Content can be a string or array of blocks
-            let content = v.get("message")?.get("content")?;
-            extract_from_content(content)
-        }
-        "user" => {
+    match msg_type {
+        "assistant" | "user" => {
             let content = v.get("message")?.get("content")?;
             extract_from_content(content)
         }
@@ -99,7 +91,6 @@ fn extract_from_content(content: &Value) -> Option<AgentEvent> {
     match content {
         Value::String(s) => Some(AgentEvent::Text { content: s.clone() }),
         Value::Array(arr) => {
-            // Take the first meaningful block
             for block in arr {
                 if let Some(event) = extract_from_block(block) {
                     return Some(event);
@@ -124,15 +115,8 @@ fn extract_from_block(block: &Value) -> Option<AgentEvent> {
         "tool_result" => {
             let id = block.get("tool_use_id")?.as_str()?.to_owned();
             let content = block.get("content").cloned().unwrap_or(Value::Null);
-            let is_error = block
-                .get("is_error")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            Some(AgentEvent::ToolResult {
-                id,
-                content,
-                is_error,
-            })
+            let is_error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
+            Some(AgentEvent::ToolResult { id, content, is_error })
         }
         "text" => {
             let content = block.get("text")?.as_str()?.to_owned();
@@ -154,15 +138,16 @@ mod tests {
 
     #[test]
     fn parse_malformed_json_returns_raw() {
-        let result = parse_line("sess-1", "not json at all");
-        assert!(result.is_some());
-        let parsed = result.unwrap();
+        let parsed = parse_line("sess-1", "not json at all").unwrap();
         assert!(matches!(parsed.event, AgentEvent::Raw { .. }));
     }
 
+    // All tests below use the real Claude Code envelope format:
+    // { "type": "assistant"|"user", "message": { "content": [...] }, ... }
+
     #[test]
     fn parse_tool_use_block() {
-        let line = r#"{"role":"assistant","message":{"content":[{"type":"tool_use","id":"tu_001","name":"Read","input":{"file_path":"/tmp/foo"}}]}}"#;
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_001","name":"Read","input":{"file_path":"/tmp/foo"}}]},"uuid":"abc"}"#;
         let parsed = parse_line("sess-1", line).expect("should parse");
         match parsed.event {
             AgentEvent::ToolUse { id, tool, .. } => {
@@ -175,14 +160,14 @@ mod tests {
 
     #[test]
     fn parse_tool_result_block() {
-        let line = r#"{"role":"user","message":{"content":[{"type":"tool_result","tool_use_id":"tu_001","content":"ok","is_error":false}]}}"#;
+        let line = r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tu_001","content":"ok","is_error":false}]},"uuid":"abc"}"#;
         let parsed = parse_line("sess-1", line).expect("should parse");
         assert!(matches!(parsed.event, AgentEvent::ToolResult { .. }));
     }
 
     #[test]
     fn parse_text_block() {
-        let line = r#"{"role":"assistant","message":{"content":[{"type":"text","text":"Hello!"}]}}"#;
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Hello!"}]},"uuid":"abc"}"#;
         let parsed = parse_line("sess-1", line).expect("should parse");
         match parsed.event {
             AgentEvent::Text { content } => assert_eq!(content, "Hello!"),
@@ -208,9 +193,28 @@ mod tests {
     }
 
     #[test]
-    fn unknown_json_becomes_raw() {
-        let line = r#"{"totally":"unknown","structure":true}"#;
+    fn queue_operation_becomes_raw() {
+        // type=queue-operation is not assistant/user -> Raw
+        let line = r#"{"type":"queue-operation","operation":"enqueue","sessionId":"s"}"#;
         let parsed = parse_line("sess-1", line).unwrap();
         assert!(matches!(parsed.event, AgentEvent::Raw { .. }));
+    }
+
+    #[test]
+    fn attachment_line_becomes_raw() {
+        let line = r#"{"type":"attachment","attachment":{"type":"deferred_tools_delta"},"uuid":"abc"}"#;
+        let parsed = parse_line("sess-1", line).unwrap();
+        assert!(matches!(parsed.event, AgentEvent::Raw { .. }));
+    }
+
+    #[test]
+    fn real_user_plain_string_content() {
+        // Content can be a plain string (not array) in user messages
+        let line = r#"{"parentUuid":null,"type":"user","message":{"role":"user","content":"Bonjour"},"uuid":"b0b2","sessionId":"abc"}"#;
+        let parsed = parse_line("abc", line).expect("should parse");
+        match parsed.event {
+            AgentEvent::Text { content } => assert_eq!(content, "Bonjour"),
+            other => panic!("Expected Text for string content, got {other:?}"),
+        }
     }
 }
