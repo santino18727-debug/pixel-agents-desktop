@@ -11,6 +11,7 @@ import { MigrationNotice } from './components/MigrationNotice.js';
 import { SettingsModal } from './components/SettingsModal.js';
 import { Tooltip } from './components/Tooltip.js';
 import { Modal } from './components/ui/Modal.js';
+import { NoAgentsOverlay } from './components/NoAgentsOverlay.js';
 import { VersionIndicator } from './components/VersionIndicator.js';
 import { ZoomControls } from './components/ZoomControls.js';
 import { useEditorActions } from './hooks/useEditorActions.js';
@@ -73,6 +74,7 @@ function App() {
     hooksEnabled,
     setHooksEnabled,
     hooksInfoShown,
+    noAgents,
   } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty);
 
   // Show migration notice once layout reset is detected
@@ -329,6 +331,8 @@ function App() {
         onToggleSettings={() => setIsSettingsOpen((v) => !v)}
         workspaceFolders={workspaceFolders}
       />
+
+      <NoAgentsOverlay visible={noAgents && layoutReady} />
 
       <VersionIndicator
         currentVersion={extensionVersion}

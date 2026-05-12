@@ -4,14 +4,18 @@ pub mod file_watcher;
 pub mod hooks_server;
 pub mod jsonl_parser;
 pub mod layout_persistence;
+pub mod session_map;
 pub mod session_registry;
 pub mod settings;
 
+use error::MutexExt;
 use file_watcher::start_watcher;
 use layout_persistence::{load_layout, save_layout};
 use session_registry::{list_sessions, new_registry, scan_projects};
 use settings::{get_settings, set_settings};
 
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::Manager;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 use tracing::error;
@@ -51,7 +55,7 @@ pub fn run() {
             // Initial project scan
             match scan_projects() {
                 Ok(sessions) => {
-                    let mut reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+                    let mut reg = registry.lock_or_recover();
                     *reg = sessions;
                 }
                 Err(e) => error!("Initial scan failed: {e}"),
@@ -72,6 +76,44 @@ pub fn run() {
                 });
             }
 
+            // System tray icon with Show/Quit menu.
+            let show_item = MenuItem::with_id(app, "show", "Show Window", true, None::<&str>)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            let tray_menu = Menu::with_items(app, &[&show_item, &quit_item])
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
+            TrayIconBuilder::new()
+                .icon(app.default_window_icon().unwrap().clone())
+                .menu(&tray_menu)
+                .tooltip("Pixel Agents Desktop")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "quit" => app.exit(0),
+                    "show" => {
+                        if let Some(win) = app.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        if let Some(win) = tray.app_handle().get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+                })
+                .build(app)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+
             // F2: Watch layout.json for external manual edits.
             layout_persistence::start_layout_watcher(app.handle().clone());
 
@@ -79,12 +121,18 @@ pub fn run() {
             // and the hooks server can resolve session_id -> agent_id.
             let session_agent_map = file_watcher::new_session_agent_map();
 
+            // Generate a per-session token for the hooks server.
+            // Expose it as an env var so Claude Code hooks config can read it.
+            let hook_token = uuid::Uuid::new_v4().to_string();
+            std::env::set_var("PIXEL_AGENTS_HOOK_TOKEN", &hook_token);
+
             // F3: Start the Claude Code Hooks API HTTP server.
             {
                 let hook_handle = app.handle().clone();
                 let hook_map = std::sync::Arc::clone(&session_agent_map);
+                let token = hook_token.clone();
                 std::thread::spawn(move || {
-                    hooks_server::start(hook_handle, hook_map);
+                    hooks_server::start(hook_handle, hook_map, token);
                 });
             }
 

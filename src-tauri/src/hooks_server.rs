@@ -17,6 +17,7 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter};
 use tracing::{info, warn};
 
+use crate::error::MutexExt;
 use crate::file_watcher::SessionAgentMap;
 
 const BIND_ADDR: &str = "127.0.0.1:17317";
@@ -24,7 +25,9 @@ const BIND_ADDR: &str = "127.0.0.1:17317";
 /// Start the hooks HTTP server. Blocks the calling thread.
 /// session_agent_map is shared with the file watcher so session_id -> agent_id
 /// resolution is consistent across both ingestion paths.
-pub fn start(app: AppHandle, session_agent_map: SessionAgentMap) {
+/// expected_token must be present in the X-Hook-Token request header; requests
+/// without it are rejected with 401 to prevent local process injection attacks.
+pub fn start(app: AppHandle, session_agent_map: SessionAgentMap, expected_token: String) {
     let listener = match TcpListener::bind(BIND_ADDR) {
         Ok(l) => l,
         Err(e) => {
@@ -39,8 +42,9 @@ pub fn start(app: AppHandle, session_agent_map: SessionAgentMap) {
             Ok(mut stream) => {
                 let app2 = app.clone();
                 let map2 = Arc::clone(&session_agent_map);
+                let token = expected_token.clone();
                 std::thread::spawn(move || {
-                    handle_connection(&mut stream, &app2, &map2);
+                    handle_connection(&mut stream, &app2, &map2, &token);
                 });
             }
             Err(e) => warn!("hooks_server: accept error: {e}"),
@@ -52,9 +56,12 @@ fn handle_connection(
     stream: &mut std::net::TcpStream,
     app: &AppHandle,
     session_agent_map: &SessionAgentMap,
+    expected_token: &str,
 ) {
+    // 30-second read timeout prevents slow-loris style hangs.
+    let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
+
     let mut reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| {
-        // If clone fails we cannot respond; just return.
         panic!("hooks_server: stream clone failed");
     }));
 
@@ -64,8 +71,9 @@ fn handle_connection(
         return;
     }
 
-    // Read headers until blank line, collecting Content-Length.
+    // Read headers until blank line, collecting Content-Length and X-Hook-Token.
     let mut content_length: usize = 0;
+    let mut received_token = String::new();
     loop {
         let mut header_line = String::new();
         if reader.read_line(&mut header_line).is_err() {
@@ -75,9 +83,20 @@ fn handle_connection(
         if trimmed.is_empty() {
             break; // end of headers
         }
-        if let Some(rest) = trimmed.to_lowercase().strip_prefix("content-length:") {
-            content_length = rest.trim().parse().unwrap_or(0);
+        let lower = trimmed.to_lowercase();
+        if let Some(rest) = lower.strip_prefix("content-length:") {
+            // Cap body size at 1 MiB to prevent memory exhaustion.
+            content_length = rest.trim().parse().unwrap_or(0).min(1024 * 1024);
+        } else if let Some(rest) = lower.strip_prefix("x-hook-token:") {
+            received_token = rest.trim().to_owned();
         }
+    }
+
+    // Reject requests with missing or wrong token.
+    if received_token != expected_token {
+        warn!("hooks_server: rejected request — invalid or missing X-Hook-Token");
+        let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+        return;
     }
 
     // Read body.
@@ -90,18 +109,11 @@ fn handle_connection(
     // Only handle POST /hook.
     let is_post_hook = request_line.starts_with("POST /hook");
 
-    // Write HTTP response.
+    // Write HTTP response with proper CRLF line endings (RFC 7230).
     let response = if is_post_hook {
-        "HTTP/1.1 200 OK
-Content-Length: 2
-Content-Type: application/json
-
-ok"
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\nok"
     } else {
-        "HTTP/1.1 404 Not Found
-Content-Length: 0
-
-"
+        "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
     };
     let _ = stream.write_all(response.as_bytes());
 
@@ -129,7 +141,7 @@ Content-Length: 0
 
     // Resolve session_id -> agent_id from the shared map.
     let agent_id = {
-        let map = session_agent_map.lock().unwrap_or_else(|e| e.into_inner());
+        let map = session_agent_map.lock_or_recover();
         match map.get(&session_id).copied() {
             Some(id) => id,
             None => {

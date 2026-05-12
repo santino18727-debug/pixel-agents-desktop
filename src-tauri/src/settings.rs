@@ -35,6 +35,10 @@ pub struct Settings {
     /// List of external directories to scan for custom asset packs (furniture, sprites).
     #[serde(default)]
     pub external_asset_directories: Vec<String>,
+
+    /// Maximum number of sessions to display (default 20, max 100).
+    #[serde(default = "default_max_sessions")]
+    pub max_sessions: usize,
 }
 
 impl Default for Settings {
@@ -46,6 +50,7 @@ impl Default for Settings {
             always_on_top: false,
             theme: default_theme(),
             external_asset_directories: Vec::new(),
+            max_sessions: default_max_sessions(),
         }
     }
 }
@@ -56,6 +61,10 @@ fn default_watch_all_sessions() -> bool {
 
 fn default_theme() -> String {
     "dark".to_owned()
+}
+
+fn default_max_sessions() -> usize {
+    20
 }
 
 /// Tauri command — returns the current settings (or defaults if not yet stored).

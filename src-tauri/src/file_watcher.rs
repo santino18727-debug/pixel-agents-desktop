@@ -11,7 +11,9 @@ use serde_json::json;
 use tauri::{AppHandle, Emitter};
 use tracing::{error, info, warn};
 
+use crate::error::MutexExt;
 use crate::jsonl_parser::{parse_line, AgentEvent};
+use crate::session_map;
 use crate::session_registry::{scan_projects, SessionRegistry};
 
 /// Per-file byte offset for tail-reading.
@@ -22,6 +24,10 @@ pub type SessionAgentMap = Arc<Mutex<HashMap<String, usize>>>;
 
 /// Map from agent_id to cancellation flag for waiting/permission timers.
 type TimerCancelMap = Arc<Mutex<HashMap<usize, Arc<AtomicBool>>>>;
+
+/// Cache of session_id -> last modified Unix seconds, updated incrementally.
+/// Used by the expiry thread instead of a full WalkDir scan every 60 seconds.
+type ModifiedCache = Arc<Mutex<HashMap<String, u64>>>;
 
 const WAITING_DELAY_MS: u64 = 2000;
 const PERMISSION_DELAY_MS: u64 = 5000;
@@ -53,6 +59,7 @@ pub fn start_watcher(
 
     let next_agent_id: Arc<Mutex<usize>> = Arc::new(Mutex::new(1));
     let timer_cancel_map: TimerCancelMap = Arc::new(Mutex::new(HashMap::new()));
+    let modified_cache: ModifiedCache = Arc::new(Mutex::new(HashMap::new()));
 
     {
         if let Ok(sessions) = scan_projects() {
@@ -60,20 +67,32 @@ pub fn start_watcher(
                 .into_iter()
                 .filter(|s| !s.is_subagent)
                 .collect();
-            let mut map = session_to_agent.lock().unwrap_or_else(|e| e.into_inner());
-            let mut next_id = next_agent_id.lock().unwrap_or_else(|e| e.into_inner());
-            for (idx, session) in main_sessions.iter().enumerate() {
-                let agent_id = idx + 1;
-                map.insert(session.session_id.clone(), agent_id);
-            }
-            *next_id = main_sessions.len() + 1;
 
-            // Seed timer cancel flags for all known agents.
-            let mut cancel_map = timer_cancel_map.lock().unwrap_or_else(|e| e.into_inner());
-            for idx in 0..main_sessions.len() {
-                let agent_id = idx + 1;
+            // Load persisted session → agent_id mapping so IDs are stable across restarts.
+            let persisted_map = session_map::load();
+            let mut next_sequential: usize = persisted_map.values().copied().max().unwrap_or(0) + 1;
+
+            let mut map = session_to_agent.lock_or_recover();
+            let mut next_id = next_agent_id.lock_or_recover();
+            let mut cache = modified_cache.lock_or_recover();
+            let mut cancel_map = timer_cancel_map.lock_or_recover();
+
+            for session in &main_sessions {
+                let agent_id = if let Some(&existing) = persisted_map.get(&session.session_id) {
+                    existing
+                } else {
+                    let id = next_sequential;
+                    next_sequential += 1;
+                    id
+                };
+                map.insert(session.session_id.clone(), agent_id);
+                cache.insert(session.session_id.clone(), session.modified_secs);
                 cancel_map.insert(agent_id, Arc::new(AtomicBool::new(false)));
             }
+            *next_id = next_sequential;
+
+            // Persist the updated map so new sessions are stable on next launch.
+            session_map::save(&map);
         }
     }
 
@@ -82,6 +101,7 @@ pub fn start_watcher(
     let session_to_agent_watcher = Arc::clone(&session_to_agent);
     let next_agent_id_watcher = Arc::clone(&next_agent_id);
     let timer_cancel_map_watcher = Arc::clone(&timer_cancel_map);
+    let modified_cache_watcher = Arc::clone(&modified_cache);
 
     let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<DebouncedEvent>, Vec<notify::Error>>>();
 
@@ -118,16 +138,19 @@ pub fn start_watcher(
                         &session_to_agent_watcher,
                         &next_agent_id_watcher,
                         &timer_cancel_map_watcher,
+                        &modified_cache_watcher,
                     );
                 }
             }
         }
     });
 
-    // Session expiry monitor: poll every 60s, emit agentClosed for sessions idle > 24h
+    // Session expiry monitor: poll every 60s, emit agentClosed for sessions idle > 24h.
+    // Uses the in-memory modified_cache instead of a full WalkDir scan each tick.
     {
         let app_expiry = app.clone();
         let s2a_expiry = Arc::clone(&session_to_agent);
+        let cache_expiry = Arc::clone(&modified_cache);
         std::thread::spawn(move || {
             const POLL_INTERVAL: Duration = Duration::from_secs(60);
             const MAX_AGE_SECS: u64 = 24 * 3600;
@@ -138,13 +161,18 @@ pub fn start_watcher(
                     .map(|d| d.as_secs())
                     .unwrap_or(0);
                 let cutoff = now_secs.saturating_sub(MAX_AGE_SECS);
-                let active_ids: std::collections::HashSet<String> = scan_projects()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .filter(|s| s.modified_secs >= cutoff)
-                    .map(|s| s.session_id)
-                    .collect();
-                let mut map = s2a_expiry.lock().unwrap_or_else(|e| e.into_inner());
+
+                // Read active session IDs from the cache (no disk I/O).
+                let active_ids: std::collections::HashSet<String> = {
+                    let cache = cache_expiry.lock_or_recover();
+                    cache
+                        .iter()
+                        .filter(|(_, &ts)| ts >= cutoff)
+                        .map(|(id, _)| id.clone())
+                        .collect()
+                };
+
+                let mut map = s2a_expiry.lock_or_recover();
                 let expired: Vec<(String, usize)> = map
                     .iter()
                     .filter(|(sid, _)| !active_ids.contains(*sid))
@@ -168,7 +196,7 @@ fn seed_offsets(_projects_root: &PathBuf, offsets: &TailOffsets) {
     let Ok(sessions) = scan_projects() else {
         return;
     };
-    let mut map = offsets.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = offsets.lock_or_recover();
     for session in sessions {
         let path = PathBuf::from(&session.jsonl_path);
         if let Ok(meta) = std::fs::metadata(&path) {
@@ -225,7 +253,7 @@ fn translate_to_frontend_messages(event: &AgentEvent, agent_id: usize) -> Vec<se
 
 /// Cancel any pending timer for the given agent and reset the flag for fresh timers.
 fn cancel_timer(timer_cancel_map: &TimerCancelMap, agent_id: usize) {
-    let mut map = timer_cancel_map.lock().unwrap_or_else(|e| e.into_inner());
+    let mut map = timer_cancel_map.lock_or_recover();
     if let Some(flag) = map.get(&agent_id) {
         flag.store(true, Ordering::SeqCst);
     }
@@ -238,7 +266,7 @@ fn cancel_timer(timer_cancel_map: &TimerCancelMap, agent_id: usize) {
 /// before either fires, cancel_timer() sets the flag to true.
 fn spawn_timers(app: &AppHandle, agent_id: usize, timer_cancel_map: &TimerCancelMap) {
     let cancelled = {
-        let mut map = timer_cancel_map.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = timer_cancel_map.lock_or_recover();
         let flag = Arc::new(AtomicBool::new(false));
         map.insert(agent_id, Arc::clone(&flag));
         flag
@@ -275,6 +303,25 @@ fn spawn_timers(app: &AppHandle, agent_id: usize, timer_cancel_map: &TimerCancel
     }
 }
 
+/// Returns the byte length of each complete (newline-terminated) line in `raw`.
+/// Handles both LF (`\n`) and CRLF (`\r\n`) terminators. Incomplete trailing
+/// lines (not ending in `\n`) are excluded.
+fn count_line_byte_lengths(raw: &[u8]) -> Vec<usize> {
+    let mut lengths = Vec::new();
+    let mut i = 0;
+    while i < raw.len() {
+        let start = i;
+        while i < raw.len() && raw[i] != b'\n' {
+            i += 1;
+        }
+        if i < raw.len() {
+            i += 1; // consume \n
+            lengths.push(i - start);
+        }
+    }
+    lengths
+}
+
 #[allow(clippy::too_many_arguments)]
 fn process_jsonl_file(
     path: &PathBuf,
@@ -284,6 +331,7 @@ fn process_jsonl_file(
     session_to_agent: &SessionAgentMap,
     next_agent_id: &Arc<Mutex<usize>>,
     timer_cancel_map: &TimerCancelMap,
+    modified_cache: &ModifiedCache,
 ) {
     let session_id = match path.file_stem().and_then(|s| s.to_str()) {
         Some(id) => id.to_owned(),
@@ -302,13 +350,13 @@ fn process_jsonl_file(
         }
     };
 
-    let mut offsets_guard = offsets.lock().unwrap_or_else(|e| e.into_inner());
+    let mut offsets_guard = offsets.lock_or_recover();
     let offset = offsets_guard.entry(path.clone()).or_insert(0);
 
     if current_len < *offset {
         *offset = 0;
         if let Ok(sessions) = scan_projects() {
-            let mut reg = registry.lock().unwrap_or_else(|e| e.into_inner());
+            let mut reg = registry.lock_or_recover();
             *reg = sessions;
         }
     }
@@ -320,15 +368,16 @@ fn process_jsonl_file(
         return;
     }
 
-    let mut buf = String::new();
-    if file.read_to_string(&mut buf).is_err() {
+    let mut raw = Vec::new();
+    if file.take(512 * 1024).read_to_end(&mut raw).is_err() {
         return;
     }
 
-    let bytes_read = buf.len() as u64;
-    if bytes_read == 0 {
+    if raw.is_empty() {
         return;
     }
+
+    let buf = String::from_utf8_lossy(&raw);
 
     let ends_with_newline = buf.ends_with('\n');
     let lines: Vec<&str> = buf.lines().collect();
@@ -341,26 +390,41 @@ fn process_jsonl_file(
         return;
     };
 
-    let processed_bytes: u64 = complete_lines
+    // Count actual bytes per line from raw buffer (handles CRLF and LF correctly).
+    let line_byte_lengths = count_line_byte_lengths(&raw);
+    let processed_bytes: u64 = line_byte_lengths
         .iter()
-        .map(|l| l.len() as u64 + 1)
-        .sum();
+        .take(complete_lines.len())
+        .sum::<usize>() as u64;
 
     {
-        let mut offsets_guard = offsets.lock().unwrap_or_else(|e| e.into_inner());
+        let mut offsets_guard = offsets.lock_or_recover();
         let offset = offsets_guard.entry(path.clone()).or_insert(start);
         *offset = start + processed_bytes;
     }
 
+    // Update the modified_secs cache for this session so the expiry thread
+    // doesn't need to do a WalkDir scan.
+    if let Ok(meta) = std::fs::metadata(path) {
+        if let Ok(mtime) = meta.modified() {
+            if let Ok(d) = mtime.duration_since(std::time::SystemTime::UNIX_EPOCH) {
+                let mut cache = modified_cache.lock_or_recover();
+                cache.insert(session_id.clone(), d.as_secs());
+            }
+        }
+    }
+
     let agent_id = {
-        let mut map = session_to_agent.lock().unwrap_or_else(|e| e.into_inner());
+        let mut map = session_to_agent.lock_or_recover();
         if let Some(&id) = map.get(&session_id) {
             id
         } else {
-            let mut next_id = next_agent_id.lock().unwrap_or_else(|e| e.into_inner());
+            let mut next_id = next_agent_id.lock_or_recover();
             let new_id = *next_id;
             *next_id += 1;
             map.insert(session_id.clone(), new_id);
+            // Persist updated map so new sessions survive restarts.
+            session_map::save(&map);
 
             let folder_name = path
                 .parent()
@@ -447,5 +511,38 @@ fn process_jsonl_file(
                 spawn_timers(app, agent_id, timer_cancel_map);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crlf_line_bytes_counted_correctly() {
+        let raw = b"line1\r\nline2\r\nline3\r\n";
+        let lengths = count_line_byte_lengths(raw);
+        assert_eq!(lengths, vec![7, 7, 7]);
+        assert_eq!(lengths.iter().sum::<usize>(), raw.len());
+    }
+
+    #[test]
+    fn lf_only_line_bytes_unchanged() {
+        let raw = b"line1\nline2\nline3\n";
+        let lengths = count_line_byte_lengths(raw);
+        assert_eq!(lengths, vec![6, 6, 6]);
+        assert_eq!(lengths.iter().sum::<usize>(), raw.len());
+    }
+
+    #[test]
+    fn incomplete_final_line_not_counted() {
+        let raw = b"line1\nincomplete";
+        let lengths = count_line_byte_lengths(raw);
+        assert_eq!(lengths, vec![6]);
+    }
+
+    #[test]
+    fn empty_raw_yields_no_lengths() {
+        assert!(count_line_byte_lengths(b"").is_empty());
     }
 }

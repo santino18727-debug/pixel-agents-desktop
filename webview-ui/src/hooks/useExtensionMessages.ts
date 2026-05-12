@@ -68,6 +68,7 @@ interface ExtensionMessageState {
   hooksEnabled: boolean;
   setHooksEnabled: (v: boolean) => void;
   hooksInfoShown: boolean;
+  noAgents: boolean;
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -105,6 +106,7 @@ export function useExtensionMessages(
   const [alwaysShowLabels, setAlwaysShowLabels] = useState(false);
   const [hooksEnabled, setHooksEnabled] = useState(true);
   const [hooksInfoShown, setHooksInfoShown] = useState(true);
+  const [noAgents, setNoAgents] = useState(false);
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false);
@@ -119,395 +121,328 @@ export function useExtensionMessages(
       folderName?: string;
     }> = [];
 
-    const handler = (e: MessageEvent) => {
-      const msg = e.data;
-      const os = getOfficeState();
+    // ── Dispatch table ───────────────────────────────────────────────────────
+    // Each entry is a named handler function that closes over local state and
+    // setters. The main handler below does a single O(1) lookup instead of a
+    // chain of 20+ else-if branches.
+    // ────────────────────────────────────────────────────────────────────────
 
-      if (msg.type === 'layoutLoaded') {
-        // Skip external layout updates while editor has unsaved changes
-        if (layoutReadyRef.current && isEditDirty?.()) {
-          console.log('[Webview] Skipping external layout update — editor has unsaved changes');
-          return;
+    type Msg = Record<string, unknown>;
+
+    const handleLayoutLoaded = (msg: Msg, os: OfficeState) => {
+      if (layoutReadyRef.current && isEditDirty?.()) {
+        console.log('[Webview] Skipping external layout update — editor has unsaved changes');
+        return;
+      }
+      const rawLayout = msg.layout as OfficeLayout | null;
+      const layout = rawLayout && rawLayout.version === 1 ? migrateLayoutColors(rawLayout) : null;
+      if (layout) {
+        os.rebuildFromLayout(layout);
+        onLayoutLoaded?.(layout);
+      } else {
+        onLayoutLoaded?.(os.getLayout());
+      }
+      for (const p of pendingAgents) {
+        os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
+      }
+      pendingAgents = [];
+      layoutReadyRef.current = true;
+      setLayoutReady(true);
+      if (msg.wasReset) setLayoutWasReset(true);
+      if (os.characters.size > 0) saveAgentSeats(os);
+    };
+
+    const handleNoAgents = () => setNoAgents(true);
+
+    const handleAgentCreated = (msg: Msg, os: OfficeState) => {
+      setNoAgents(false);
+      const id = msg.id as number;
+      const folderName = msg.folderName as string | undefined;
+      const isTeammate = msg.isTeammate as boolean | undefined;
+      const teammateName = msg.teammateName as string | undefined;
+      const teammateParentId = msg.parentAgentId as number | undefined;
+      const teamName = msg.teamName as string | undefined;
+      setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]));
+      if (!isTeammate) setSelectedAgent(id);
+      if (isTeammate && teammateParentId !== undefined) {
+        const parentCh = os.characters.get(teammateParentId);
+        os.addAgent(id, parentCh?.palette, parentCh?.hueShift, undefined, undefined, parentCh?.folderName);
+        const ch = os.characters.get(id);
+        if (ch) {
+          ch.leadAgentId = teammateParentId;
+          ch.teamName = teamName ?? parentCh?.teamName;
+          ch.agentName = teammateName;
         }
-        const rawLayout = msg.layout as OfficeLayout | null;
-        const layout = rawLayout && rawLayout.version === 1 ? migrateLayoutColors(rawLayout) : null;
-        if (layout) {
-          os.rebuildFromLayout(layout);
-          onLayoutLoaded?.(layout);
-        } else {
-          // Default layout — snapshot whatever OfficeState built
-          onLayoutLoaded?.(os.getLayout());
-        }
-        // Add buffered agents now that layout (and seats) are correct
-        for (const p of pendingAgents) {
-          os.addAgent(p.id, p.palette, p.hueShift, p.seatId, true, p.folderName);
-        }
-        pendingAgents = [];
-        layoutReadyRef.current = true;
-        setLayoutReady(true);
-        if (msg.wasReset) {
-          setLayoutWasReset(true);
-        }
-        if (os.characters.size > 0) {
-          saveAgentSeats(os);
-        }
-      } else if (msg.type === 'agentCreated') {
-        const id = msg.id as number;
-        const folderName = msg.folderName as string | undefined;
-        const isTeammate = msg.isTeammate as boolean | undefined;
-        const teammateName = msg.teammateName as string | undefined;
-        const teammateParentId = msg.parentAgentId as number | undefined;
-        const teamName = msg.teamName as string | undefined;
-        setAgents((prev) => (prev.includes(id) ? prev : [...prev, id]));
-        // Don't auto-select teammates (keep focus on lead)
-        if (!isTeammate) {
-          setSelectedAgent(id);
-        }
-        if (isTeammate && teammateParentId !== undefined) {
-          // Teammate: inherit parent's palette and workspace folderName (teammate runs
-          // in the same workspace as the lead). Name shown via agentName (teamRoleLabel).
-          const parentCh = os.characters.get(teammateParentId);
-          const palette = parentCh ? parentCh.palette : undefined;
-          const hueShift = parentCh ? parentCh.hueShift : undefined;
-          os.addAgent(id, palette, hueShift, undefined, undefined, parentCh?.folderName);
-          // Set team metadata on the character
-          const ch = os.characters.get(id);
-          if (ch) {
-            ch.leadAgentId = teammateParentId;
-            ch.teamName = teamName ?? parentCh?.teamName;
-            ch.agentName = teammateName;
-          }
-        } else {
-          os.addAgent(id, undefined, undefined, undefined, undefined, folderName);
-        }
-        saveAgentSeats(os);
-      } else if (msg.type === 'agentClosed') {
-        const id = msg.id as number;
-        setAgents((prev) => prev.filter((a) => a !== id));
-        setSelectedAgent((prev) => (prev === id ? null : prev));
-        setAgentTools((prev) => {
+      } else {
+        os.addAgent(id, undefined, undefined, undefined, undefined, folderName);
+      }
+      saveAgentSeats(os);
+    };
+
+    const handleAgentClosed = (msg: Msg, os: OfficeState) => {
+      const id = msg.id as number;
+      setAgents((prev) => prev.filter((a) => a !== id));
+      setSelectedAgent((prev) => (prev === id ? null : prev));
+      setAgentTools((prev) => { const n = { ...prev }; delete n[id]; return n; });
+      setAgentStatuses((prev) => { const n = { ...prev }; delete n[id]; return n; });
+      setSubagentTools((prev) => { const n = { ...prev }; delete n[id]; return n; });
+      os.removeAllSubagents(id);
+      setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
+      os.removeAgent(id);
+    };
+
+    const handleExistingAgents = (msg: Msg) => {
+      const incoming = msg.agents as number[];
+      const meta = (msg.agentMeta || {}) as Record<number, { palette?: number; hueShift?: number; seatId?: string }>;
+      const folderNames = (msg.folderNames || {}) as Record<number, string>;
+      for (const id of incoming) {
+        const m = meta[id];
+        pendingAgents.push({ id, palette: m?.palette, hueShift: m?.hueShift, seatId: m?.seatId, folderName: folderNames[id] });
+      }
+      setAgents((prev) => {
+        const ids = new Set(prev);
+        const merged = [...prev];
+        for (const id of incoming) { if (!ids.has(id)) merged.push(id); }
+        return merged.sort((a, b) => a - b);
+      });
+    };
+
+    const handleAgentSelected = (msg: Msg) => setSelectedAgent(msg.id as number);
+
+    const handleAgentStatus = (msg: Msg, os: OfficeState) => {
+      const id = msg.id as number;
+      const status = msg.status as string;
+      setAgentStatuses((prev) => {
+        if (status === 'active') {
           if (!(id in prev)) return prev;
-          const next = { ...prev };
-          delete next[id];
-          return next;
+          const n = { ...prev }; delete n[id]; return n;
+        }
+        return { ...prev, [id]: status };
+      });
+      os.setAgentActive(id, status === 'active');
+      if (status === 'waiting') { os.showWaitingBubble(id); playDoneSound(); }
+    };
+
+    const handleAgentToolStart = (msg: Msg, os: OfficeState) => {
+      const id = msg.id as number;
+      const toolId = msg.toolId as string;
+      const status = msg.status as string;
+      const permissionActive = msg.permissionActive as boolean | undefined;
+      setAgentTools((prev) => {
+        const list = prev[id] || [];
+        if (list.some((t) => t.toolId === toolId)) return prev;
+        return { ...prev, [id]: [...list, { toolId, status, done: false, permissionWait: permissionActive || false }] };
+      });
+      const toolName = (msg.toolName as string | undefined) ?? extractToolName(status);
+      os.setAgentTool(id, toolName);
+      os.setAgentActive(id, true);
+      if (!permissionActive) os.clearPermissionBubble(id);
+      const runInBackground = msg.runInBackground as boolean | undefined;
+      if ((toolName === 'Task' || toolName === 'Agent') && !runInBackground && !toolId.startsWith('hook-')) {
+        const label = status.startsWith('Subtask:') ? status.slice('Subtask:'.length).trim() : '';
+        const subId = os.addSubagent(id, toolId);
+        setSubagentCharacters((prev) => {
+          if (prev.some((s) => s.id === subId)) return prev;
+          return [...prev, { id: subId, parentAgentId: id, parentToolId: toolId, label }];
         });
-        setAgentStatuses((prev) => {
-          if (!(id in prev)) return prev;
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setSubagentTools((prev) => {
-          if (!(id in prev)) return prev;
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        // Remove all sub-agent characters belonging to this agent
+      }
+    };
+
+    const handleAgentToolDone = (msg: Msg) => {
+      const id = msg.id as number;
+      const toolId = msg.toolId as string;
+      setAgentTools((prev) => {
+        const list = prev[id];
+        if (!list) return prev;
+        return { ...prev, [id]: list.map((t) => (t.toolId === toolId ? { ...t, done: true } : t)) };
+      });
+    };
+
+    const handleAgentToolsClear = (msg: Msg, os: OfficeState) => {
+      const id = msg.id as number;
+      setAgentTools((prev) => { const n = { ...prev }; delete n[id]; return n; });
+      setSubagentTools((prev) => { const n = { ...prev }; delete n[id]; return n; });
+      const clearCh = os.characters.get(id);
+      const hasInlineTeammates = clearCh?.teamName && clearCh?.isTeamLead && !clearCh?.teamUsesTmux;
+      if (!hasInlineTeammates) {
         os.removeAllSubagents(id);
         setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
-        os.removeAgent(id);
-      } else if (msg.type === 'existingAgents') {
-        const incoming = msg.agents as number[];
-        const meta = (msg.agentMeta || {}) as Record<
-          number,
-          { palette?: number; hueShift?: number; seatId?: string }
-        >;
-        const folderNames = (msg.folderNames || {}) as Record<number, string>;
-        // Buffer agents — they'll be added in layoutLoaded after seats are built
-        for (const id of incoming) {
-          const m = meta[id];
-          pendingAgents.push({
-            id,
-            palette: m?.palette,
-            hueShift: m?.hueShift,
-            seatId: m?.seatId,
-            folderName: folderNames[id],
-          });
-        }
-        setAgents((prev) => {
-          const ids = new Set(prev);
-          const merged = [...prev];
-          for (const id of incoming) {
-            if (!ids.has(id)) {
-              merged.push(id);
-            }
-          }
-          return merged.sort((a, b) => a - b);
-        });
-      } else if (msg.type === 'agentToolStart') {
-        const id = msg.id as number;
-        const toolId = msg.toolId as string;
-        const status = msg.status as string;
-        const permissionActive = msg.permissionActive as boolean | undefined;
-        setAgentTools((prev) => {
-          const list = prev[id] || [];
-          if (list.some((t) => t.toolId === toolId)) return prev;
-          return {
-            ...prev,
-            [id]: [
-              ...list,
-              { toolId, status, done: false, permissionWait: permissionActive || false },
-            ],
-          };
-        });
-        const toolName = (msg.toolName as string | undefined) ?? extractToolName(status);
-        os.setAgentTool(id, toolName);
-        os.setAgentActive(id, true);
-        // Don't clear the permission bubble if the hook already confirmed permission is needed
-        if (!permissionActive) {
-          os.clearPermissionBubble(id);
-        }
-        // Create sub-agent character for Task/Agent tool subtasks.
-        // In tmux / inline teams mode, Agent tool has run_in_background=true -- those
-        // are handled via the independent teammate path (onTeammateDetected), not here.
-        // runInBackground gates them out so we don't create ghost sub-agents for them.
-        //
-        // Skip creation for synthetic hook-ids. Later SubagentStop/subagentClear use
-        // the REAL tool id from JSONL; creating with a synthetic id would orphan the
-        // sub-agent (mismatched keys). JSONL's agentToolStart (with real id) handles
-        // creation in both hooks and heuristic modes -- ~500ms delay vs instant hook.
-        const runInBackground = msg.runInBackground as boolean | undefined;
-        if (
-          (toolName === 'Task' || toolName === 'Agent') &&
-          !runInBackground &&
-          !toolId.startsWith('hook-')
-        ) {
-          const label = status.startsWith('Subtask:') ? status.slice('Subtask:'.length).trim() : '';
-          const subId = os.addSubagent(id, toolId);
-          setSubagentCharacters((prev) => {
-            if (prev.some((s) => s.id === subId)) return prev;
-            return [...prev, { id: subId, parentAgentId: id, parentToolId: toolId, label }];
-          });
-        }
-      } else if (msg.type === 'agentToolDone') {
-        const id = msg.id as number;
-        const toolId = msg.toolId as string;
-        setAgentTools((prev) => {
-          const list = prev[id];
-          if (!list) return prev;
-          return {
-            ...prev,
-            [id]: list.map((t) => (t.toolId === toolId ? { ...t, done: true } : t)),
-          };
-        });
-      } else if (msg.type === 'agentToolsClear') {
-        const id = msg.id as number;
-        setAgentTools((prev) => {
-          if (!(id in prev)) return prev;
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        setSubagentTools((prev) => {
-          if (!(id in prev)) return prev;
-          const next = { ...prev };
-          delete next[id];
-          return next;
-        });
-        // Remove all sub-agent characters belonging to this agent.
-        // Exception: team leads with inline teammates -- their sub-agents represent
-        // real teammates and should only be removed by SubagentStop/subagentClear.
-        const clearCh = os.characters.get(id);
-        const hasInlineTeammates =
-          clearCh?.teamName && clearCh?.isTeamLead && !clearCh?.teamUsesTmux;
-        if (!hasInlineTeammates) {
-          os.removeAllSubagents(id);
-          setSubagentCharacters((prev) => prev.filter((s) => s.parentAgentId !== id));
-        }
-        os.setAgentTool(id, null);
-        os.clearPermissionBubble(id);
-      } else if (msg.type === 'agentSelected') {
-        const id = msg.id as number;
-        setSelectedAgent(id);
-      } else if (msg.type === 'agentStatus') {
-        const id = msg.id as number;
-        const status = msg.status as string;
-        setAgentStatuses((prev) => {
-          if (status === 'active') {
-            if (!(id in prev)) return prev;
-            const next = { ...prev };
-            delete next[id];
-            return next;
-          }
-          return { ...prev, [id]: status };
-        });
-        os.setAgentActive(id, status === 'active');
-        if (status === 'waiting') {
-          os.showWaitingBubble(id);
-          playDoneSound();
-        }
-      } else if (msg.type === 'agentToolPermission') {
-        const id = msg.id as number;
-        setAgentTools((prev) => {
-          const list = prev[id];
-          if (!list) return prev;
-          return {
-            ...prev,
-            [id]: list.map((t) => (t.done ? t : { ...t, permissionWait: true })),
-          };
-        });
-        os.showPermissionBubble(id);
-        playPermissionSound();
-      } else if (msg.type === 'subagentToolPermission') {
-        const id = msg.id as number;
-        const parentToolId = msg.parentToolId as string;
-        // Show permission bubble on the sub-agent character
-        const subId = os.getSubagentId(id, parentToolId);
-        if (subId !== null) {
-          os.showPermissionBubble(subId);
-        }
-      } else if (msg.type === 'agentToolPermissionClear') {
-        const id = msg.id as number;
-        setAgentTools((prev) => {
-          const list = prev[id];
-          if (!list) return prev;
-          const hasPermission = list.some((t) => t.permissionWait);
-          if (!hasPermission) return prev;
-          return {
-            ...prev,
-            [id]: list.map((t) => (t.permissionWait ? { ...t, permissionWait: false } : t)),
-          };
-        });
-        os.clearPermissionBubble(id);
-        // Also clear permission bubbles on all sub-agent characters of this parent
-        for (const [subId, meta] of os.subagentMeta) {
-          if (meta.parentAgentId === id) {
-            os.clearPermissionBubble(subId);
-          }
-        }
-      } else if (msg.type === 'subagentToolStart') {
-        const id = msg.id as number;
-        const parentToolId = msg.parentToolId as string;
-        const toolId = msg.toolId as string;
-        const status = msg.status as string;
-        setSubagentTools((prev) => {
-          const agentSubs = prev[id] || {};
-          const list = agentSubs[parentToolId] || [];
-          if (list.some((t) => t.toolId === toolId)) return prev;
-          return {
-            ...prev,
-            [id]: { ...agentSubs, [parentToolId]: [...list, { toolId, status, done: false }] },
-          };
-        });
-        // Update sub-agent character's tool and active state (if already created by
-        // agentToolStart via PreToolUse). The lookup uses the REAL parent tool id from
-        // JSONL, which won't match the synthetic hook-id the sub-agent was created
-        // with -- so this is a best-effort update for the heuristic (JSONL-driven) path.
-        const subId = os.getSubagentId(id, parentToolId);
-        if (subId !== null) {
-          const subToolName = extractToolName(status);
-          os.setAgentTool(subId, subToolName);
-          os.setAgentActive(subId, true);
-        }
-      } else if (msg.type === 'subagentToolDone') {
-        const id = msg.id as number;
-        const parentToolId = msg.parentToolId as string;
-        const toolId = msg.toolId as string;
-        setSubagentTools((prev) => {
-          const agentSubs = prev[id];
-          if (!agentSubs) return prev;
-          const list = agentSubs[parentToolId];
-          if (!list) return prev;
-          return {
-            ...prev,
-            [id]: {
-              ...agentSubs,
-              [parentToolId]: list.map((t) => (t.toolId === toolId ? { ...t, done: true } : t)),
-            },
-          };
-        });
-      } else if (msg.type === 'subagentClear') {
-        const id = msg.id as number;
-        const parentToolId = msg.parentToolId as string;
-        setSubagentTools((prev) => {
-          const agentSubs = prev[id];
-          if (!agentSubs || !(parentToolId in agentSubs)) return prev;
-          const next = { ...agentSubs };
-          delete next[parentToolId];
-          if (Object.keys(next).length === 0) {
-            const outer = { ...prev };
-            delete outer[id];
-            return outer;
-          }
-          return { ...prev, [id]: next };
-        });
-        // Remove sub-agent character
-        os.removeSubagent(id, parentToolId);
-        setSubagentCharacters((prev) =>
-          prev.filter((s) => !(s.parentAgentId === id && s.parentToolId === parentToolId)),
-        );
-      } else if (msg.type === 'characterSpritesLoaded') {
-        const characters = msg.characters as Array<{
-          down: string[][][];
-          up: string[][][];
-          right: string[][][];
-        }>;
-        console.log(`[Webview] Received ${characters.length} pre-colored character sprites`);
-        setCharacterTemplates(characters);
-      } else if (msg.type === 'floorTilesLoaded') {
-        const sprites = msg.sprites as string[][][];
-        console.log(`[Webview] Received ${sprites.length} floor tile patterns`);
-        setFloorSprites(sprites);
-      } else if (msg.type === 'wallTilesLoaded') {
-        const sets = msg.sets as string[][][][];
-        console.log(`[Webview] Received ${sets.length} wall tile set(s)`);
-        setWallSprites(sets);
-      } else if (msg.type === 'workspaceFolders') {
-        const folders = msg.folders as WorkspaceFolder[];
-        setWorkspaceFolders(folders);
-      } else if (msg.type === 'settingsLoaded') {
-        const soundOn = msg.soundEnabled as boolean;
-        setSoundEnabled(soundOn);
-        if (typeof msg.watchAllSessions === 'boolean') {
-          setWatchAllSessions(msg.watchAllSessions as boolean);
-        }
-        if (typeof msg.alwaysShowLabels === 'boolean') {
-          setAlwaysShowLabels(msg.alwaysShowLabels as boolean);
-        }
-        if (typeof msg.hooksEnabled === 'boolean') {
-          setHooksEnabled(msg.hooksEnabled as boolean);
-        }
-        if (typeof msg.hooksInfoShown === 'boolean') {
-          setHooksInfoShown(msg.hooksInfoShown as boolean);
-        }
-        if (Array.isArray(msg.externalAssetDirectories)) {
-          setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
-        }
-        if (typeof msg.lastSeenVersion === 'string') {
-          setLastSeenVersion(msg.lastSeenVersion as string);
-        }
-        if (typeof msg.extensionVersion === 'string') {
-          setExtensionVersion(msg.extensionVersion as string);
-        }
-      } else if (msg.type === 'externalAssetDirectoriesUpdated') {
-        if (Array.isArray(msg.dirs)) {
-          setExternalAssetDirectories(msg.dirs as string[]);
-        }
-      } else if (msg.type === 'furnitureAssetsLoaded') {
-        try {
-          const catalog = msg.catalog as FurnitureAsset[];
-          const sprites = msg.sprites as Record<string, string[][]>;
-          console.log(`📦 Webview: Loaded ${catalog.length} furniture assets`);
-          // Build dynamic catalog immediately so getCatalogEntry() works when layoutLoaded arrives next
-          buildDynamicCatalog({ catalog, sprites });
-          setLoadedAssets({ catalog, sprites });
-        } catch (err) {
-          console.error(`❌ Webview: Error processing furnitureAssetsLoaded:`, err);
-        }
-      } else if (msg.type === 'agentTeamInfo') {
-        const id = msg.id as number;
-        os.setTeamInfo(
-          id,
-          msg.teamName as string | undefined,
-          msg.agentName as string | undefined,
-          msg.isTeamLead as boolean | undefined,
-          msg.leadAgentId as number | undefined,
-          msg.teamUsesTmux as boolean | undefined,
-        );
-      } else if (msg.type === 'agentTokenUsage') {
-        const id = msg.id as number;
-        os.setAgentTokens(id, msg.inputTokens as number, msg.outputTokens as number);
+      }
+      os.setAgentTool(id, null);
+      os.clearPermissionBubble(id);
+    };
+
+    const handleAgentToolPermission = (msg: Msg, os: OfficeState) => {
+      const id = msg.id as number;
+      setAgentTools((prev) => {
+        const list = prev[id];
+        if (!list) return prev;
+        return { ...prev, [id]: list.map((t) => (t.done ? t : { ...t, permissionWait: true })) };
+      });
+      os.showPermissionBubble(id);
+      playPermissionSound();
+    };
+
+    const handleAgentToolPermissionClear = (msg: Msg, os: OfficeState) => {
+      const id = msg.id as number;
+      setAgentTools((prev) => {
+        const list = prev[id];
+        if (!list) return prev;
+        if (!list.some((t) => t.permissionWait)) return prev;
+        return { ...prev, [id]: list.map((t) => (t.permissionWait ? { ...t, permissionWait: false } : t)) };
+      });
+      os.clearPermissionBubble(id);
+      for (const [subId, meta] of os.subagentMeta) {
+        if (meta.parentAgentId === id) os.clearPermissionBubble(subId);
+      }
+    };
+
+    const handleSubagentToolPermission = (msg: Msg, os: OfficeState) => {
+      const subId = os.getSubagentId(msg.id as number, msg.parentToolId as string);
+      if (subId !== null) os.showPermissionBubble(subId);
+    };
+
+    const handleSubagentToolStart = (msg: Msg, os: OfficeState) => {
+      const id = msg.id as number;
+      const parentToolId = msg.parentToolId as string;
+      const toolId = msg.toolId as string;
+      const status = msg.status as string;
+      setSubagentTools((prev) => {
+        const agentSubs = prev[id] || {};
+        const list = agentSubs[parentToolId] || [];
+        if (list.some((t) => t.toolId === toolId)) return prev;
+        return { ...prev, [id]: { ...agentSubs, [parentToolId]: [...list, { toolId, status, done: false }] } };
+      });
+      const subId = os.getSubagentId(id, parentToolId);
+      if (subId !== null) { os.setAgentTool(subId, extractToolName(status)); os.setAgentActive(subId, true); }
+    };
+
+    const handleSubagentToolDone = (msg: Msg) => {
+      const id = msg.id as number;
+      const parentToolId = msg.parentToolId as string;
+      const toolId = msg.toolId as string;
+      setSubagentTools((prev) => {
+        const agentSubs = prev[id];
+        if (!agentSubs) return prev;
+        const list = agentSubs[parentToolId];
+        if (!list) return prev;
+        return { ...prev, [id]: { ...agentSubs, [parentToolId]: list.map((t) => (t.toolId === toolId ? { ...t, done: true } : t)) } };
+      });
+    };
+
+    const handleSubagentClear = (msg: Msg, os: OfficeState) => {
+      const id = msg.id as number;
+      const parentToolId = msg.parentToolId as string;
+      setSubagentTools((prev) => {
+        const agentSubs = prev[id];
+        if (!agentSubs || !(parentToolId in agentSubs)) return prev;
+        const next = { ...agentSubs };
+        delete next[parentToolId];
+        if (Object.keys(next).length === 0) { const outer = { ...prev }; delete outer[id]; return outer; }
+        return { ...prev, [id]: next };
+      });
+      os.removeSubagent(id, parentToolId);
+      setSubagentCharacters((prev) => prev.filter((s) => !(s.parentAgentId === id && s.parentToolId === parentToolId)));
+    };
+
+    const handleCharacterSpritesLoaded = (msg: Msg) => {
+      const chars = msg.characters as Array<{ down: string[][][]; up: string[][][]; right: string[][][] }>;
+      console.log(`[Webview] Received ${chars.length} pre-colored character sprites`);
+      setCharacterTemplates(chars);
+    };
+
+    const handleFloorTilesLoaded = (msg: Msg) => {
+      const sprites = msg.sprites as string[][][];
+      console.log(`[Webview] Received ${sprites.length} floor tile patterns`);
+      setFloorSprites(sprites);
+    };
+
+    const handleWallTilesLoaded = (msg: Msg) => {
+      const sets = msg.sets as string[][][][];
+      console.log(`[Webview] Received ${sets.length} wall tile set(s)`);
+      setWallSprites(sets);
+    };
+
+    const handleFurnitureAssetsLoaded = (msg: Msg) => {
+      try {
+        const catalog = msg.catalog as FurnitureAsset[];
+        const sprites = msg.sprites as Record<string, string[][]>;
+        console.log(`[Webview] Loaded ${catalog.length} furniture assets`);
+        buildDynamicCatalog({ catalog, sprites });
+        setLoadedAssets({ catalog, sprites });
+      } catch (err) {
+        console.error('[Webview] Error processing furnitureAssetsLoaded:', err);
+      }
+    };
+
+    const handleWorkspaceFolders = (msg: Msg) => setWorkspaceFolders(msg.folders as WorkspaceFolder[]);
+
+    const handleSettingsLoaded = (msg: Msg) => {
+      setSoundEnabled(msg.soundEnabled as boolean);
+      if (typeof msg.watchAllSessions === 'boolean') setWatchAllSessions(msg.watchAllSessions as boolean);
+      if (typeof msg.alwaysShowLabels === 'boolean') setAlwaysShowLabels(msg.alwaysShowLabels as boolean);
+      if (typeof msg.hooksEnabled === 'boolean') setHooksEnabled(msg.hooksEnabled as boolean);
+      if (typeof msg.hooksInfoShown === 'boolean') setHooksInfoShown(msg.hooksInfoShown as boolean);
+      if (Array.isArray(msg.externalAssetDirectories)) setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
+      if (typeof msg.lastSeenVersion === 'string') setLastSeenVersion(msg.lastSeenVersion as string);
+      if (typeof msg.extensionVersion === 'string') setExtensionVersion(msg.extensionVersion as string);
+    };
+
+    const handleExternalAssetDirectoriesUpdated = (msg: Msg) => {
+      if (Array.isArray(msg.dirs)) setExternalAssetDirectories(msg.dirs as string[]);
+    };
+
+    const handleAgentTeamInfo = (msg: Msg, os: OfficeState) => {
+      os.setTeamInfo(
+        msg.id as number,
+        msg.teamName as string | undefined,
+        msg.agentName as string | undefined,
+        msg.isTeamLead as boolean | undefined,
+        msg.leadAgentId as number | undefined,
+        msg.teamUsesTmux as boolean | undefined,
+      );
+    };
+
+    const handleAgentTokenUsage = (msg: Msg, os: OfficeState) =>
+      os.setAgentTokens(msg.id as number, msg.inputTokens as number, msg.outputTokens as number);
+
+    // Dispatch table — O(1) lookup replacing 20+ else-if branches.
+    const handlers: Record<string, (msg: Msg, os: OfficeState) => void> = {
+      layoutLoaded: handleLayoutLoaded,
+      noAgents: handleNoAgents,
+      agentCreated: handleAgentCreated,
+      agentClosed: handleAgentClosed,
+      existingAgents: handleExistingAgents,
+      agentSelected: handleAgentSelected,
+      agentStatus: handleAgentStatus,
+      agentToolStart: handleAgentToolStart,
+      agentToolDone: handleAgentToolDone,
+      agentToolsClear: handleAgentToolsClear,
+      agentToolPermission: handleAgentToolPermission,
+      agentToolPermissionClear: handleAgentToolPermissionClear,
+      subagentToolPermission: handleSubagentToolPermission,
+      subagentToolStart: handleSubagentToolStart,
+      subagentToolDone: handleSubagentToolDone,
+      subagentClear: handleSubagentClear,
+      characterSpritesLoaded: handleCharacterSpritesLoaded,
+      floorTilesLoaded: handleFloorTilesLoaded,
+      wallTilesLoaded: handleWallTilesLoaded,
+      furnitureAssetsLoaded: handleFurnitureAssetsLoaded,
+      workspaceFolders: handleWorkspaceFolders,
+      settingsLoaded: handleSettingsLoaded,
+      externalAssetDirectoriesUpdated: handleExternalAssetDirectoriesUpdated,
+      agentTeamInfo: handleAgentTeamInfo,
+      agentTokenUsage: handleAgentTokenUsage,
+    };
+
+    const handler = (e: MessageEvent) => {
+      const msg = e.data as Msg;
+      const os = getOfficeState();
+      const fn = handlers[msg.type as string];
+      if (fn) {
+        fn(msg, os);
+      } else {
+        console.debug('[Webview] Unhandled message type:', msg.type);
       }
     };
     window.addEventListener('message', handler);
@@ -536,5 +471,6 @@ export function useExtensionMessages(
     hooksEnabled,
     setHooksEnabled,
     hooksInfoShown,
+    noAgents,
   };
 }

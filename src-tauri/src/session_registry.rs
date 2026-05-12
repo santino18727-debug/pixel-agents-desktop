@@ -163,14 +163,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn decode_folder_name_simple() {
-        // C--Dev-pixel-agents-desktop -> pixel-agents-desktop
+    fn decode_folder_name_windows_single_level() {
+        // Windows encoding: C:\Dev\pixel-agents-desktop -> C--Dev-pixel-agents-desktop
+        // Claude Code uses -- for :\ and - for subsequent \
+        // Best output: strip drive prefix, show path remainder.
         assert_eq!(decode_folder_name("C--Dev-pixel-agents-desktop"), "Dev-pixel-agents-desktop");
     }
 
     #[test]
-    fn decode_folder_name_deep_path() {
-        // C--Dev--projects--my-app -> my-app
+    fn decode_folder_name_deep_path_double_dash() {
+        // Some systems encode all \ as --; we still take the last segment.
         assert_eq!(decode_folder_name("C--Dev--projects--my-app"), "my-app");
     }
 
@@ -182,6 +184,7 @@ mod tests {
 
     #[test]
     fn decode_folder_name_station_math() {
+        // C:\Dev\station-math-app -> C--Dev-station-math-app
         assert_eq!(decode_folder_name("C--Dev-station-math-app"), "Dev-station-math-app");
     }
 }

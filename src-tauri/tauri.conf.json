@@ -10,6 +10,13 @@
     "beforeBuildCommand": "cd webview-ui && npm run build"
   },
   "app": {
+    "trayIcon": {
+      "id": "pixel-agents-tray",
+      "iconPath": "icons/32x32.png",
+      "iconAsTemplate": false,
+      "menuOnLeftClick": false,
+      "tooltip": "Pixel Agents Desktop"
+    },
     "windows": [
       {
         "label": "main",

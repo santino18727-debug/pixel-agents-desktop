@@ -54,25 +54,30 @@ async function bootstrap(): Promise<void> {
       extensionVersion?: string;
       lastSeenVersion?: string;
       externalAssetDirectories?: string[];
+      maxSessions?: number;
     };
 
-    const sessionPromise: Promise<SessionRecord[]> = isTauri
+    // Load settings first to get maxSessions, then fetch sessions.
+    // We start both promises in parallel; settings loads fast from tauri-plugin-store.
+    const settingsEarlyPromise: Promise<PersistedSettings | null> = isTauri
       ? import("@tauri-apps/api/core").then(({ invoke }) =>
-          invoke<SessionRecord[]>("list_sessions", { maxAgeHours: 24, limit: 20 }).catch(() => []),
+          invoke<PersistedSettings>("get_settings").catch(() => null),
         )
-      : Promise.resolve([]);
+      : Promise.resolve(null);
+
+    const sessionPromise: Promise<SessionRecord[]> = settingsEarlyPromise.then((s) => {
+      const limit = Math.min(Math.max(s?.maxSessions ?? 20, 1), 100);
+      return isTauri
+        ? import("@tauri-apps/api/core").then(({ invoke }) =>
+            invoke<SessionRecord[]>("list_sessions", { maxAgeHours: 24, limit }).catch(() => []),
+          )
+        : Promise.resolve([]);
+    });
 
     // P1: Load persisted layout from Rust backend (returns null if absent or corrupt).
     const persistedLayoutPromise: Promise<unknown | null> = isTauri
       ? import("@tauri-apps/api/core").then(({ invoke }) =>
           invoke<unknown | null>("load_layout").catch(() => null),
-        )
-      : Promise.resolve(null);
-
-    // P3: Load persisted settings from Rust backend (returns null/empty if not yet stored).
-    const settingsPromise: Promise<PersistedSettings | null> = isTauri
-      ? import("@tauri-apps/api/core").then(({ invoke }) =>
-          invoke<PersistedSettings>("get_settings").catch(() => null),
         )
       : Promise.resolve(null);
 
@@ -86,7 +91,7 @@ async function bootstrap(): Promise<void> {
         fetchJson<unknown>("/assets/default-layout-1.json").catch(() => null),
         sessionPromise,
         persistedLayoutPromise,
-        settingsPromise,
+        settingsEarlyPromise,
       ]);
 
     dispatch({ type: "characterSpritesLoaded", characters });
@@ -120,6 +125,9 @@ async function bootstrap(): Promise<void> {
           path: s.project_dir,
         })),
       });
+    } else {
+      // No active sessions found — inform frontend to show an empty-state overlay.
+      dispatch({ type: "noAgents" });
     }
 
     // P1: Use persisted layout if available, otherwise fall back to default layout.
@@ -134,6 +142,7 @@ async function bootstrap(): Promise<void> {
       extensionVersion: "0.1.0",
       lastSeenVersion: "",
       externalAssetDirectories: [],
+      maxSessions: 20,
     };
     const mergedSettings = persistedSettings
       ? { ...settingsDefaults, ...persistedSettings }
