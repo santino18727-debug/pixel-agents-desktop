@@ -1,5 +1,7 @@
+pub mod asset_loader;
 pub mod error;
 pub mod file_watcher;
+pub mod hooks_server;
 pub mod jsonl_parser;
 pub mod layout_persistence;
 pub mod session_registry;
@@ -35,6 +37,7 @@ pub fn run() {
             set_settings,
             save_layout,
             load_layout,
+            asset_loader::scan_external_assets,
         ])
         .setup(move |app| {
             // Restore saved window size and position (tauri-plugin-window-state).
@@ -69,11 +72,28 @@ pub fn run() {
                 });
             }
 
-            // Start filesystem watcher
+            // F2: Watch layout.json for external manual edits.
+            layout_persistence::start_layout_watcher(app.handle().clone());
+
+            // F1 + F3: Create the shared SessionAgentMap so both the file watcher
+            // and the hooks server can resolve session_id -> agent_id.
+            let session_agent_map = file_watcher::new_session_agent_map();
+
+            // F3: Start the Claude Code Hooks API HTTP server.
+            {
+                let hook_handle = app.handle().clone();
+                let hook_map = std::sync::Arc::clone(&session_agent_map);
+                std::thread::spawn(move || {
+                    hooks_server::start(hook_handle, hook_map);
+                });
+            }
+
+            // Start filesystem watcher (passes shared session_agent_map).
             let handle = app.handle().clone();
             let reg = registry.clone();
+            let watcher_map = std::sync::Arc::clone(&session_agent_map);
             std::thread::spawn(move || {
-                if let Err(e) = start_watcher(handle, reg) {
+                if let Err(e) = start_watcher(handle, reg, watcher_map) {
                     error!("File watcher failed to start: {e}");
                 }
             });

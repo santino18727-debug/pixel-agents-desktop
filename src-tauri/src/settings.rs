@@ -31,6 +31,10 @@ pub struct Settings {
     /// Visual theme ("dark" | "light").
     #[serde(default = "default_theme")]
     pub theme: String,
+
+    /// List of external directories to scan for custom asset packs (furniture, sprites).
+    #[serde(default)]
+    pub external_asset_directories: Vec<String>,
 }
 
 impl Default for Settings {
@@ -41,6 +45,7 @@ impl Default for Settings {
             always_show_labels: false,
             always_on_top: false,
             theme: default_theme(),
+            external_asset_directories: Vec::new(),
         }
     }
 }

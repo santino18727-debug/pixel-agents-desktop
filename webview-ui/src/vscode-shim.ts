@@ -144,6 +144,33 @@ async function bootstrap(): Promise<void> {
       ...mergedSettings,
     });
 
+    // F4: Load external assets if configured.
+    if (
+      isTauri &&
+      mergedSettings.externalAssetDirectories &&
+      mergedSettings.externalAssetDirectories.length > 0
+    ) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const externalAssets = await invoke<{
+          catalog: unknown[];
+          sprites: unknown;
+          characters: unknown[];
+        }>("scan_external_assets", {
+          dirs: mergedSettings.externalAssetDirectories,
+        }).catch(() => null);
+        if (externalAssets) {
+          dispatch({
+            type: "furnitureAssetsLoaded",
+            catalog: externalAssets.catalog,
+            sprites: externalAssets.sprites,
+          });
+        }
+      } catch (e) {
+        console.warn("[Tauri shim] scan_external_assets failed:", e);
+      }
+    }
+
     if (isTauri) {
       await subscribeTauriEvents();
     }
@@ -167,6 +194,10 @@ async function subscribeTauriEvents(): Promise<void> {
       dispatch({ type: "settingsLoaded", ...Object(event.payload) }),
     );
     await listen<unknown>("update-agents", (event) => dispatch(event.payload));
+    // F2: Re-dispatch layoutLoaded when layout.json is edited externally.
+    await listen<unknown>("layout-changed", (event) =>
+      dispatch({ type: "layoutLoaded", layout: event.payload, wasReset: false }),
+    );
   } catch (e) {
     console.error("[Tauri shim] subscribeTauriEvents failed:", e);
   }

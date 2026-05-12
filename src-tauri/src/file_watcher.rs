@@ -1,6 +1,7 @@
-﻿use std::collections::HashMap;
+use std::collections::HashMap;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -17,9 +18,25 @@ use crate::session_registry::{scan_projects, SessionRegistry};
 type TailOffsets = Arc<Mutex<HashMap<PathBuf, u64>>>;
 
 /// Map from session_id string to frontend agent ID (usize).
-type SessionAgentMap = Arc<Mutex<HashMap<String, usize>>>;
+pub type SessionAgentMap = Arc<Mutex<HashMap<String, usize>>>;
 
-pub fn start_watcher(app: AppHandle, registry: SessionRegistry) -> crate::error::Result<()> {
+/// Map from agent_id to cancellation flag for waiting/permission timers.
+type TimerCancelMap = Arc<Mutex<HashMap<usize, Arc<AtomicBool>>>>;
+
+const WAITING_DELAY_MS: u64 = 2000;
+const PERMISSION_DELAY_MS: u64 = 5000;
+
+/// Create a new, empty SessionAgentMap.
+/// Called from lib.rs so the map can be shared with hooks_server.
+pub fn new_session_agent_map() -> SessionAgentMap {
+    Arc::new(Mutex::new(HashMap::new()))
+}
+
+pub fn start_watcher(
+    app: AppHandle,
+    registry: SessionRegistry,
+    session_to_agent: SessionAgentMap,
+) -> crate::error::Result<()> {
     let home = dirs::home_dir().ok_or_else(|| {
         crate::error::AppError::Settings("Cannot resolve home directory".to_owned())
     })?;
@@ -34,8 +51,8 @@ pub fn start_watcher(app: AppHandle, registry: SessionRegistry) -> crate::error:
     let offsets: TailOffsets = Arc::new(Mutex::new(HashMap::new()));
     seed_offsets(&projects_root, &offsets);
 
-    let session_to_agent: SessionAgentMap = Arc::new(Mutex::new(HashMap::new()));
     let next_agent_id: Arc<Mutex<usize>> = Arc::new(Mutex::new(1));
+    let timer_cancel_map: TimerCancelMap = Arc::new(Mutex::new(HashMap::new()));
 
     {
         if let Ok(sessions) = scan_projects() {
@@ -50,6 +67,13 @@ pub fn start_watcher(app: AppHandle, registry: SessionRegistry) -> crate::error:
                 map.insert(session.session_id.clone(), agent_id);
             }
             *next_id = main_sessions.len() + 1;
+
+            // Seed timer cancel flags for all known agents.
+            let mut cancel_map = timer_cancel_map.lock().unwrap_or_else(|e| e.into_inner());
+            for idx in 0..main_sessions.len() {
+                let agent_id = idx + 1;
+                cancel_map.insert(agent_id, Arc::new(AtomicBool::new(false)));
+            }
         }
     }
 
@@ -57,6 +81,7 @@ pub fn start_watcher(app: AppHandle, registry: SessionRegistry) -> crate::error:
     let app_watcher = app.clone();
     let session_to_agent_watcher = Arc::clone(&session_to_agent);
     let next_agent_id_watcher = Arc::clone(&next_agent_id);
+    let timer_cancel_map_watcher = Arc::clone(&timer_cancel_map);
 
     let (tx, rx) = std::sync::mpsc::channel::<Result<Vec<DebouncedEvent>, Vec<notify::Error>>>();
 
@@ -92,6 +117,7 @@ pub fn start_watcher(app: AppHandle, registry: SessionRegistry) -> crate::error:
                         &registry,
                         &session_to_agent_watcher,
                         &next_agent_id_watcher,
+                        &timer_cancel_map_watcher,
                     );
                 }
             }
@@ -177,18 +203,12 @@ fn translate_to_frontend_messages(event: &AgentEvent, agent_id: usize) -> Vec<se
             })]
         }
         AgentEvent::System { subtype, .. } if subtype == "turn_duration" => {
-            // P3: emit "waiting" (not "idle") so frontend shows the user-attention bubble.
-            vec![
-                json!({
-                    "type": "agentToolsClear",
-                    "id": agent_id,
-                }),
-                json!({
-                    "type": "agentStatus",
-                    "id": agent_id,
-                    "status": "waiting",
-                }),
-            ]
+            // F1: Only emit agentToolsClear immediately.
+            // The waiting and permission timers are handled separately in process_jsonl_file.
+            vec![json!({
+                "type": "agentToolsClear",
+                "id": agent_id,
+            })]
         }
         // P2: emit token usage so frontend can display consumption per agent.
         AgentEvent::TokenUsage { input_tokens, output_tokens } => {
@@ -203,6 +223,59 @@ fn translate_to_frontend_messages(event: &AgentEvent, agent_id: usize) -> Vec<se
     }
 }
 
+/// Cancel any pending timer for the given agent and reset the flag for fresh timers.
+fn cancel_timer(timer_cancel_map: &TimerCancelMap, agent_id: usize) {
+    let mut map = timer_cancel_map.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(flag) = map.get(&agent_id) {
+        flag.store(true, Ordering::SeqCst);
+    }
+    // Reset with a fresh flag so subsequent timers for this agent start clean.
+    map.insert(agent_id, Arc::new(AtomicBool::new(false)));
+}
+
+/// Spawn waiting (2s) and permission (5s) timers for the given agent.
+/// Both timers share the same cancellation flag; if a new ToolUse arrives
+/// before either fires, cancel_timer() sets the flag to true.
+fn spawn_timers(app: &AppHandle, agent_id: usize, timer_cancel_map: &TimerCancelMap) {
+    let cancelled = {
+        let mut map = timer_cancel_map.lock().unwrap_or_else(|e| e.into_inner());
+        let flag = Arc::new(AtomicBool::new(false));
+        map.insert(agent_id, Arc::clone(&flag));
+        flag
+    };
+
+    // Waiting timer: after WAITING_DELAY_MS, emit agentStatus waiting.
+    {
+        let app_w = app.clone();
+        let cancelled_w = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(WAITING_DELAY_MS));
+            if !cancelled_w.load(Ordering::SeqCst) {
+                let msg = json!({ "type": "agentStatus", "id": agent_id, "status": "waiting" });
+                if let Err(e) = app_w.emit("agent-event", &msg) {
+                    warn!("Failed to emit agentStatus waiting for agent {agent_id}: {e}");
+                }
+            }
+        });
+    }
+
+    // Permission timer: after PERMISSION_DELAY_MS, emit agentToolPermission.
+    {
+        let app_p = app.clone();
+        let cancelled_p = Arc::clone(&cancelled);
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(PERMISSION_DELAY_MS));
+            if !cancelled_p.load(Ordering::SeqCst) {
+                let msg = json!({ "type": "agentToolPermission", "id": agent_id });
+                if let Err(e) = app_p.emit("agent-event", &msg) {
+                    warn!("Failed to emit agentToolPermission for agent {agent_id}: {e}");
+                }
+            }
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn process_jsonl_file(
     path: &PathBuf,
     offsets: &TailOffsets,
@@ -210,6 +283,7 @@ fn process_jsonl_file(
     registry: &SessionRegistry,
     session_to_agent: &SessionAgentMap,
     next_agent_id: &Arc<Mutex<usize>>,
+    timer_cancel_map: &TimerCancelMap,
 ) {
     let session_id = match path.file_stem().and_then(|s| s.to_str()) {
         Some(id) => id.to_owned(),
@@ -311,13 +385,11 @@ fn process_jsonl_file(
 
     // P3: Resolve parent agent id from path if this is a subagent file.
     // Subagent paths look like: <projects_root>/<project>/<parent_uuid>/subagents/<file>.jsonl
-    // The parent_session_id is the directory that contains the "subagents" folder.
     let path_parent_session_id: Option<String> = {
-        // Walk up: file -> subagents dir -> parent_uuid dir
-        path.parent() // subagents/
+        path.parent()
             .and_then(|p| {
                 if p.file_name().and_then(|n| n.to_str()) == Some("subagents") {
-                    p.parent() // parent_uuid dir
+                    p.parent()
                         .and_then(|pp| pp.file_name())
                         .and_then(|n| n.to_str())
                         .map(str::to_owned)
@@ -331,7 +403,6 @@ fn process_jsonl_file(
         if let Some(parsed) = parse_line(&session_id, line) {
             // P3: handle SubagentInit - emit agentTeamInfo linking sub-agent to parent.
             if let AgentEvent::SubagentInit { parent_session_id, .. } = &parsed.event {
-                // Prefer explicit parent from JSONL, fall back to path-derived parent.
                 let effective_parent = parent_session_id
                     .as_deref()
                     .or(path_parent_session_id.as_deref());
@@ -356,11 +427,24 @@ fn process_jsonl_file(
                 continue; // SubagentInit has no other frontend messages
             }
 
+            // F1: On ToolUse, cancel any pending waiting/permission timers for this agent.
+            if matches!(parsed.event, AgentEvent::ToolUse { .. }) {
+                cancel_timer(timer_cancel_map, agent_id);
+            }
+
             let messages = translate_to_frontend_messages(&parsed.event, agent_id);
             for msg in messages {
                 if let Err(e) = app.emit("agent-event", &msg) {
                     warn!("Failed to emit agent-event: {e}");
                 }
+            }
+
+            // F1: On turn_duration, spawn waiting and permission timers.
+            if matches!(
+                parsed.event,
+                AgentEvent::System { ref subtype, .. } if subtype == "turn_duration"
+            ) {
+                spawn_timers(app, agent_id, timer_cancel_map);
             }
         }
     }
