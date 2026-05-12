@@ -98,13 +98,13 @@ pub fn start_watcher(app: AppHandle, registry: SessionRegistry) -> crate::error:
         }
     });
 
-    // Session expiry monitor: poll every 60s, emit agentClosed for sessions idle > 4h
+    // Session expiry monitor: poll every 60s, emit agentClosed for sessions idle > 24h
     {
         let app_expiry = app.clone();
         let s2a_expiry = Arc::clone(&session_to_agent);
         std::thread::spawn(move || {
             const POLL_INTERVAL: Duration = Duration::from_secs(60);
-            const MAX_AGE_SECS: u64 = 4 * 3600;
+            const MAX_AGE_SECS: u64 = 24 * 3600;
             loop {
                 std::thread::sleep(POLL_INTERVAL);
                 let now_secs = std::time::SystemTime::now()
@@ -177,6 +177,7 @@ fn translate_to_frontend_messages(event: &AgentEvent, agent_id: usize) -> Vec<se
             })]
         }
         AgentEvent::System { subtype, .. } if subtype == "turn_duration" => {
+            // P3: emit "waiting" (not "idle") so frontend shows the user-attention bubble.
             vec![
                 json!({
                     "type": "agentToolsClear",
@@ -185,9 +186,18 @@ fn translate_to_frontend_messages(event: &AgentEvent, agent_id: usize) -> Vec<se
                 json!({
                     "type": "agentStatus",
                     "id": agent_id,
-                    "status": "idle",
+                    "status": "waiting",
                 }),
             ]
+        }
+        // P2: emit token usage so frontend can display consumption per agent.
+        AgentEvent::TokenUsage { input_tokens, output_tokens } => {
+            vec![json!({
+                "type": "agentTokenUsage",
+                "id": agent_id,
+                "inputTokens": input_tokens,
+                "outputTokens": output_tokens,
+            })]
         }
         _ => vec![],
     }

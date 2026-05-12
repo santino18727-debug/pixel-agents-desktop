@@ -1,10 +1,12 @@
 pub mod error;
 pub mod file_watcher;
 pub mod jsonl_parser;
+pub mod layout_persistence;
 pub mod session_registry;
 pub mod settings;
 
 use file_watcher::start_watcher;
+use layout_persistence::{load_layout, save_layout};
 use session_registry::{list_sessions, new_registry, scan_projects};
 use settings::{get_settings, set_settings};
 
@@ -31,6 +33,8 @@ pub fn run() {
             list_sessions,
             get_settings,
             set_settings,
+            save_layout,
+            load_layout,
         ])
         .setup(move |app| {
             // Restore saved window size and position (tauri-plugin-window-state).

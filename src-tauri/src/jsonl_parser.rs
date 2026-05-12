@@ -25,6 +25,10 @@ pub enum AgentEvent {
     Raw {
         raw: String,
     },
+    TokenUsage {
+        input_tokens: u64,
+        output_tokens: u64,
+    },
 }
 
 /// A parsed line enriched with its session context.
@@ -79,7 +83,23 @@ fn extract_content_block(v: &Value) -> Option<AgentEvent> {
     let msg_type = v.get("type").and_then(Value::as_str)?;
 
     match msg_type {
-        "assistant" | "user" => {
+        "assistant" => {
+            let message = v.get("message")?;
+            // Emit TokenUsage if the assistant message carries a usage object.
+            if let Some(usage) = message.get("usage") {
+                let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                if input > 0 || output > 0 {
+                    return Some(AgentEvent::TokenUsage {
+                        input_tokens: input,
+                        output_tokens: output,
+                    });
+                }
+            }
+            let content = message.get("content")?;
+            extract_from_content(content)
+        }
+        "user" => {
             let content = v.get("message")?.get("content")?;
             extract_from_content(content)
         }
