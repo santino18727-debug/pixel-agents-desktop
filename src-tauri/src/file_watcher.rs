@@ -414,6 +414,25 @@ fn process_jsonl_file(
         }
     }
 
+    // Detect if this path is a sub-agent:
+    // Layout: <projects_root>/<project>/<parent_uuid>/subagents/<child_uuid>.jsonl
+    let is_subagent_path = path
+        .parent()
+        .and_then(|p| p.file_name())
+        .and_then(|n| n.to_str())
+        == Some("subagents");
+
+    // Derive parent session_id from path for sub-agents.
+    let path_parent_sid: Option<String> = if is_subagent_path {
+        path.parent()
+            .and_then(|p| p.parent())
+            .and_then(|pp| pp.file_name())
+            .and_then(|n| n.to_str())
+            .map(str::to_owned)
+    } else {
+        None
+    };
+
     let agent_id = {
         let mut map = session_to_agent.lock_or_recover();
         if let Some(&id) = map.get(&session_id) {
@@ -433,11 +452,37 @@ fn process_jsonl_file(
                 .unwrap_or("unknown")
                 .to_owned();
 
-            let created_msg = json!({
-                "type": "agentCreated",
-                "id": new_id,
-                "folderName": folder_name,
-            });
+            // Build agentCreated payload, enriched for sub-agents.
+            let created_msg = if is_subagent_path {
+                // Resolve the parent's numeric agent_id from the session map.
+                let parent_agent_id = path_parent_sid
+                    .as_deref()
+                    .and_then(|psid| map.get(psid).copied());
+                if let Some(paid) = parent_agent_id {
+                    json!({
+                        "type": "agentCreated",
+                        "id": new_id,
+                        "folderName": folder_name,
+                        "isTeammate": true,
+                        "parentAgentId": paid,
+                    })
+                } else {
+                    // Parent not yet registered — emit without parentAgentId
+                    // (agentTeamInfo will link them when SubagentInit is processed).
+                    json!({
+                        "type": "agentCreated",
+                        "id": new_id,
+                        "folderName": folder_name,
+                        "isTeammate": true,
+                    })
+                }
+            } else {
+                json!({
+                    "type": "agentCreated",
+                    "id": new_id,
+                    "folderName": folder_name,
+                })
+            };
 
             if let Err(e) = app.emit("agent-event", &created_msg) {
                 warn!("Failed to emit agentCreated: {e}");
@@ -447,29 +492,13 @@ fn process_jsonl_file(
         }
     };
 
-    // P3: Resolve parent agent id from path if this is a subagent file.
-    // Subagent paths look like: <projects_root>/<project>/<parent_uuid>/subagents/<file>.jsonl
-    let path_parent_session_id: Option<String> = {
-        path.parent()
-            .and_then(|p| {
-                if p.file_name().and_then(|n| n.to_str()) == Some("subagents") {
-                    p.parent()
-                        .and_then(|pp| pp.file_name())
-                        .and_then(|n| n.to_str())
-                        .map(str::to_owned)
-                } else {
-                    None
-                }
-            })
-    };
-
     for line in complete_lines {
         if let Some(parsed) = parse_line(&session_id, line) {
             // P3: handle SubagentInit - emit agentTeamInfo linking sub-agent to parent.
             if let AgentEvent::SubagentInit { parent_session_id, .. } = &parsed.event {
                 let effective_parent = parent_session_id
                     .as_deref()
-                    .or(path_parent_session_id.as_deref());
+                    .or(path_parent_sid.as_deref());
                 if let Some(parent_sid) = effective_parent {
                     let parent_agent_id = session_to_agent
                         .lock()

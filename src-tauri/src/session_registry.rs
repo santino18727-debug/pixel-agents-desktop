@@ -17,6 +17,9 @@ pub struct SessionMeta {
     /// under ~/.claude/projects/ (e.g.  -> ).
     pub folder_name: String,
     pub is_subagent: bool,
+    /// For sub-agent sessions, the session_id of the parent (derived from path).
+    /// None for top-level sessions.
+    pub parent_session_id: Option<String>,
     pub jsonl_path: String,
     /// Unix timestamp (seconds) of last modification, or 0 if unavailable.
     pub modified_secs: u64,
@@ -104,6 +107,19 @@ fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> 
     // components[0] = project dirname, components[1] = file or "subagents", ...
     let is_subagent = components.contains(&"subagents");
 
+    // For sub-agents, derive parent session_id from path:
+    // path layout: <project>/<parent_uuid>/subagents/<child_uuid>.jsonl
+    // so the parent uuid is the component just before "subagents".
+    let parent_session_id: Option<String> = if is_subagent {
+        components
+            .iter()
+            .position(|&c| c == "subagents")
+            .and_then(|idx| if idx > 0 { components.get(idx - 1).copied() } else { None })
+            .map(str::to_owned)
+    } else {
+        None
+    };
+
     let encoded_dir_name = components.first()?.to_string();
 
     let project_dir = projects_root
@@ -127,6 +143,7 @@ fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> 
         project_dir,
         folder_name,
         is_subagent,
+        parent_session_id,
         jsonl_path: jsonl_path.to_string_lossy().into_owned(),
         modified_secs,
     })

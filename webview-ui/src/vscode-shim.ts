@@ -46,6 +46,8 @@ async function bootstrap(): Promise<void> {
       /** Human-readable project name, decoded from Claude Code path encoding. */
       folder_name: string;
       is_subagent: boolean;
+      /** For sub-agent sessions, the session_id of the parent (derived from path). */
+      parent_session_id: string | null;
       jsonl_path: string;
       modified_secs: number;
     };
@@ -128,6 +130,25 @@ async function bootstrap(): Promise<void> {
           name: s.folder_name || s.project_dir.split(/[\/]/).pop() || s.project_dir,
           path: s.project_dir,
         })),
+      });
+
+      // Dispatch existing sub-agents as agentCreated with isTeammate: true.
+      // IDs continue the sequence after mainSessions (1-based).
+      const subSessions = sessions.filter((s) => s.is_subagent);
+      subSessions.forEach((sub, subIdx) => {
+        const parentSession = mainSessions.find(
+          (m) => m.session_id === sub.parent_session_id,
+        );
+        if (!parentSession) return; // parent not found — skip silently
+        const parentId = mainSessions.indexOf(parentSession) + 1;
+        const subId = mainSessions.length + subIdx + 1;
+        dispatch({
+          type: "agentCreated",
+          id: subId,
+          isTeammate: true,
+          parentAgentId: parentId,
+          folderName: sub.folder_name || sub.project_dir.split(/[\/]/).pop() || sub.project_dir,
+        });
       });
     } else {
       // No active sessions found — inform frontend to show an empty-state overlay.
