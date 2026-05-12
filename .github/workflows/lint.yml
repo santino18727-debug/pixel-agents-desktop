@@ -1,0 +1,59 @@
+name: Lint & Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  rust:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: 'src-tauri -> target'
+
+      - name: Cargo fmt check
+        working-directory: src-tauri
+        run: cargo fmt --check
+
+      - name: Cargo clippy
+        working-directory: src-tauri
+        run: cargo clippy -- -D warnings
+
+      - name: Cargo test
+        working-directory: src-tauri
+        run: cargo test
+
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: webview-ui/package-lock.json
+
+      - name: Install dependencies
+        working-directory: webview-ui
+        run: npm ci
+
+      - name: TypeScript check
+        working-directory: webview-ui
+        run: npx tsc --noEmit
+
+      - name: ESLint
+        working-directory: webview-ui
+        run: npm run lint
