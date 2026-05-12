@@ -132,6 +132,11 @@ function App() {
     editor.handleToggleEditMode,
   );
 
+  const handleRefresh = useCallback(() => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (window as any).__pixelAgentsRefresh?.();
+  }, []);
+
   const handleCloseAgent = useCallback((id: number) => {
     vscode.postMessage({ type: 'closeAgent', id });
   }, []);
@@ -330,6 +335,7 @@ function App() {
         isSettingsOpen={isSettingsOpen}
         onToggleSettings={() => setIsSettingsOpen((v) => !v)}
         workspaceFolders={workspaceFolders}
+        onRefresh={handleRefresh}
       />
 
       <NoAgentsOverlay visible={noAgents && layoutReady} />

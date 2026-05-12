@@ -14,6 +14,7 @@ interface BottomToolbarProps {
   isSettingsOpen: boolean;
   onToggleSettings: () => void;
   workspaceFolders: WorkspaceFolder[];
+  onRefresh: () => void;
 }
 
 export function BottomToolbar({
@@ -23,9 +24,11 @@ export function BottomToolbar({
   isSettingsOpen,
   onToggleSettings,
   workspaceFolders,
+  onRefresh,
 }: BottomToolbarProps) {
   const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false);
   const [isBypassMenuOpen, setIsBypassMenuOpen] = useState(false);
+  const [isSpinning, setIsSpinning] = useState(false);
   const folderPickerRef = useRef<HTMLDivElement>(null);
   const pendingBypassRef = useRef(false);
   // Close folder picker / bypass menu on outside click
@@ -63,6 +66,13 @@ export function BottomToolbar({
     if (!isFolderPickerOpen) {
       setIsBypassMenuOpen(false);
     }
+  };
+
+  const handleRefresh = () => {
+    if (isSpinning) return;
+    setIsSpinning(true);
+    onRefresh();
+    setTimeout(() => setIsSpinning(false), 700);
   };
 
   const handleFolderSelect = (folder: WorkspaceFolder) => {
@@ -131,6 +141,20 @@ export function BottomToolbar({
         title="Settings"
       >
         Settings
+      </Button>
+      <Button
+        variant="default"
+        size="icon_lg"
+        onClick={handleRefresh}
+        title="Refresh — reload sessions and assets"
+        aria-label="Refresh"
+      >
+        <span
+          className={isSpinning ? 'animate-spin-once' : ''}
+          style={{ display: 'inline-block', fontSize: '1.4rem', lineHeight: 1 }}
+        >
+          ↻
+        </span>
       </Button>
     </div>
   );

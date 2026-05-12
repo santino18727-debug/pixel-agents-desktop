@@ -34,6 +34,10 @@ if (document.readyState !== "loading") {
   scheduleBootstrap();
 }
 
+// Exposed so the UI refresh button can re-run the full bootstrap sequence.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+(window as any).__pixelAgentsRefresh = () => void bootstrap();
+
 async function bootstrap(): Promise<void> {
   try {
     type SessionRecord = {
