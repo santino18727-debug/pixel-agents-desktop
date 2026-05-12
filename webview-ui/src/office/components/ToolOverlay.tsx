@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import { useEffect, useState } from 'react';
 
 import { Button } from '../../components/ui/Button.js';

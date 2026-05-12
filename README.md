@@ -80,3 +80,13 @@ This is a contribution toward [pablodelucca/pixel-agents](https://github.com/pab
 ## License
 
 MIT — see upstream for original copyright.
+
+## Dependencies & API Usage
+
+Pixel Agents Desktop is a viewer for Claude Code sessions — it reads local session files written to `~/.claude/projects/` by the Claude Code CLI, but does not interact with the Anthropic API or require authentication. Built with Tauri v2, it parses Claude Code's internal JSONL session format to visualize agent activity in real-time. It is not affiliated with Anthropic and does not depend on the Anthropic SDK. All session data originates from local Claude Code runs; this app does not make API calls or send data to Anthropic's servers.
+
+## Credits
+
+This project is a Tauri v2 desktop fork of [pixel-agents](https://github.com/pablodelucca/pixel-agents) by Pablo De Lucca.
+The `webview-ui/` and `shared/` directories are derived from that work, used here under the terms of the MIT License.
+Original source: https://github.com/pablodelucca/pixel-agents

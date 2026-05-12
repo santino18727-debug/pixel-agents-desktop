@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import { useState } from 'react';
 
 import type { useEditorActions } from '../hooks/useEditorActions.js';

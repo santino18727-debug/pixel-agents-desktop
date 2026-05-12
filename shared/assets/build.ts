@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 /**
  * Build-time asset generators — shared between Vite plugin, extension host,
  * and future standalone backends.

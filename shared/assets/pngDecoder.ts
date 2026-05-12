@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 /**
  * Pure PNG decoding utilities — shared between the extension host, Vite build
  * scripts, and future standalone backend.

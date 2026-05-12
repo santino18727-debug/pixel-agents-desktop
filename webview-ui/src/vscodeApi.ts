@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import { isBrowserRuntime } from './runtime';
 
 declare function acquireVsCodeApi(): { postMessage(msg: unknown): void };

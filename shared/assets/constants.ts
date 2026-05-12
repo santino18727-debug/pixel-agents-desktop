@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 /**
  * Shared constants — used by the extension host, Vite build scripts,
  * and future standalone backend.

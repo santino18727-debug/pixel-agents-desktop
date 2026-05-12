@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 /**
  * Server-side asset decoders — shared between Vite plugin, extension host,
  * and future standalone backends.

@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 /**
  * Browser runtime mock — fetches assets and injects the same postMessage
  * events the VS Code extension would send.

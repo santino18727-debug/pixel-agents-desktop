@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import { useCallback, useRef, useState } from 'react';
 
 import type { ColorValue } from '../components/ui/types.js';

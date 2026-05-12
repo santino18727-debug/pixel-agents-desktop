@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import { useEffect } from 'react';
 
 import type { EditorState } from '../office/editor/editorState.js';

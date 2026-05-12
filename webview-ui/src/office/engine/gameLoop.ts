@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import { MAX_DELTA_TIME_SEC } from '../../constants.js';
 
 /** @internal */

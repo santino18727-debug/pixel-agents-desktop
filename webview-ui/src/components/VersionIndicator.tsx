@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import { useCallback, useEffect, useState } from 'react';
 
 import { toMajorMinor } from '../changelogData.ts';
@@ -97,7 +99,7 @@ export function VersionIndicator({
         className="absolute bottom-8 right-28 z-20 text-lg cursor-pointer select-none pr-2 transition-opacity duration-200"
         style={{ opacity: labelHovered ? 0.8 : 0.4 }}
       >
-        v{currentMajorMinor}
+        v{currentVersion}
       </div>
     </>
   );

@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 /** HSBC color value used for colorizing sprites, floor tiles, walls, and furniture. */
 export interface ColorValue {
   /** Hue: 0-360 in colorize mode, -180 to +180 in adjust mode */

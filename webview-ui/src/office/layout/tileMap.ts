@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import { TileType } from '../types.js';
 
 /** Check if a tile is walkable (floor, carpet, or doorway, and not blocked by furniture) */

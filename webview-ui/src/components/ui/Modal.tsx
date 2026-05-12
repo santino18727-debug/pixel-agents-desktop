@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import type { ReactNode } from 'react';
 
 import { Button } from './Button.js';

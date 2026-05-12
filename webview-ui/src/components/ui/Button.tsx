@@ -1,3 +1,5 @@
+// Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
+// Licensed under MIT
 import type { ButtonHTMLAttributes } from 'react';
 
 const base = 'border-2 rounded-none cursor-pointer';
