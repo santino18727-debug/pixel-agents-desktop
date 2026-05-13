@@ -61,6 +61,7 @@ async function bootstrap(): Promise<void> {
       lastSeenVersion?: string;
       externalAssetDirectories?: string[];
       maxSessions?: number;
+      hooksEnabled?: boolean;
     };
 
     // Load settings first to get maxSessions, then fetch sessions.
@@ -72,10 +73,10 @@ async function bootstrap(): Promise<void> {
       : Promise.resolve(null);
 
     const sessionPromise: Promise<SessionRecord[]> = settingsEarlyPromise.then((s) => {
-      const limit = Math.min(Math.max(s?.maxSessions ?? 20, 1), 100);
+      const limit = Math.min(Math.max(s?.maxSessions ?? 8, 1), 50);
       return isTauri
         ? import("@tauri-apps/api/core").then(({ invoke }) =>
-            invoke<SessionRecord[]>("list_sessions", { maxAgeHours: 24, limit }).catch(() => []),
+            invoke<SessionRecord[]>("list_sessions", { maxAgeHours: 2, limit }).catch(() => []),
           )
         : Promise.resolve([]);
     });
@@ -94,7 +95,7 @@ async function bootstrap(): Promise<void> {
         fetchJson<unknown>("/assets/decoded/walls.json"),
         fetchJson<unknown>("/assets/decoded/furniture.json"),
         fetchJson<unknown>("/assets/furniture-catalog.json").catch(() => []),
-        fetchJson<unknown>("/assets/default-layout-1.json").catch(() => null),
+        fetchJson<unknown>("/assets/default-layout-2.json").catch(() => null),
         sessionPromise,
         persistedLayoutPromise,
         settingsEarlyPromise,
@@ -122,6 +123,12 @@ async function bootstrap(): Promise<void> {
         agents: agentIds,
         agentMeta: {},
         folderNames,
+      });
+
+      // Always start existing sessions as idle at boot — the file watcher will quickly
+      // re-activate characters if Claude Code is actively running tools.
+      mainSessions.forEach((_s, i) => {
+        dispatch({ type: "agentStatus", id: i + 1, status: "idle" });
       });
       // P2: dispatch workspaceFolders so the frontend can display folder names per agent.
       dispatch({
@@ -167,7 +174,7 @@ async function bootstrap(): Promise<void> {
       extensionVersion: "0.1.0",
       lastSeenVersion: "",
       externalAssetDirectories: [],
-      maxSessions: 20,
+      maxSessions: 8,
     };
     const mergedSettings = persistedSettings
       ? { ...settingsDefaults, ...persistedSettings }
@@ -220,18 +227,24 @@ async function fetchJson<T>(url: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+// Module-level unlisten store
+let _unlistenFns: Array<() => void> = [];
+
 async function subscribeTauriEvents(): Promise<void> {
+  // Clean up previous listeners first
+  for (const fn of _unlistenFns) fn();
+  _unlistenFns = [];
   try {
     const { listen } = await import("@tauri-apps/api/event");
-    await listen<unknown>("agent-event", (event) => dispatch(event.payload));
-    await listen<unknown>("settings-changed", (event) =>
+    _unlistenFns.push(await listen<unknown>("agent-event", (event) => dispatch(event.payload)));
+    _unlistenFns.push(await listen<unknown>("settings-changed", (event) =>
       dispatch({ type: "settingsLoaded", ...Object(event.payload) }),
-    );
-    await listen<unknown>("update-agents", (event) => dispatch(event.payload));
+    ));
+    _unlistenFns.push(await listen<unknown>("update-agents", (event) => dispatch(event.payload)));
     // F2: Re-dispatch layoutLoaded when layout.json is edited externally.
-    await listen<unknown>("layout-changed", (event) =>
+    _unlistenFns.push(await listen<unknown>("layout-changed", (event) =>
       dispatch({ type: "layoutLoaded", layout: event.payload, wasReset: false }),
-    );
+    ));
   } catch (e) {
     console.error("[Tauri shim] subscribeTauriEvents failed:", e);
   }
@@ -256,11 +269,68 @@ async function handleOutboundMessage(msg: unknown): Promise<void> {
       case "updateSettings":
         await invoke("set_settings", { settings: m.settings }).catch(() => {});
         break;
+      case "setSoundEnabled":
+        await invoke("set_settings", { settings: { soundEnabled: m.enabled } }).catch(() => {});
+        break;
+      case "setWatchAllSessions":
+        await invoke("set_settings", { settings: { watchAllSessions: m.enabled } }).catch(() => {});
+        break;
+      case "setAlwaysShowLabels":
+        await invoke("set_settings", { settings: { alwaysShowLabels: m.enabled } }).catch(() => {});
+        break;
+      case "setHooksEnabled":
+        await invoke("set_settings", { settings: { hooksEnabled: m.enabled } }).catch(() => {});
+        break;
       case "saveLayout":
         // P1: persist layout to ~/.pixel-agents/layout.json via Rust
         await invoke("save_layout", { layout: m.layout }).catch((e: unknown) => {
           console.error("[Tauri shim] save_layout failed:", e);
         });
+        break;
+      case "exportLayout": {
+        // Trigger download via a data URL — no Rust needed
+        const json = JSON.stringify(m.layout, null, 2);
+        const blob = new Blob([json], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "pixel-agents-layout.json";
+        a.click();
+        URL.revokeObjectURL(url);
+        break;
+      }
+      case "importLayout": {
+        // Open file picker
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".json";
+        input.onchange = async () => {
+          const file = input.files?.[0];
+          if (!file) return;
+          try {
+            const text = await file.text();
+            const layout = JSON.parse(text);
+            dispatch({ type: "layoutLoaded", layout, wasReset: false });
+          } catch (e) {
+            console.error("[Tauri shim] importLayout parse error:", e);
+          }
+        };
+        input.click();
+        break;
+      }
+      case "addExternalAssetDirectory":
+      case "removeExternalAssetDirectory": {
+        // Update settings with new dirs list
+        await invoke("set_settings", { settings: { externalAssetDirectories: m.directories } }).catch(() => {});
+        break;
+      }
+      case "openSessionsFolder": {
+        await invoke("open_sessions_folder").catch(() => {});
+        break;
+      }
+      case "saveAgentSeats":
+      case "webviewReady":
+        // No-op in Tauri mode
         break;
       default:
         console.debug("[Tauri shim] Unhandled postMessage:", m.type);

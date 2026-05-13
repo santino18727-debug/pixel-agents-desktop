@@ -153,7 +153,7 @@ export function renderScene(
     const spriteData = getCharacterSprite(ch, sprites);
     const cached = getCachedSprite(spriteData, zoom);
     // Sitting offset: shift character down when seated so they visually sit in the chair
-    const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
+    const sittingOffset = (ch.state === CharacterState.TYPE || ch.state === CharacterState.BREAK) ? CHARACTER_SITTING_OFFSET_PX : 0;
     // Anchor at bottom-center of character — round to integer device pixels
     const drawX = Math.round(offsetX + ch.x * zoom - cached.width / 2);
     const drawY = Math.round(offsetY + (ch.y + sittingOffset) * zoom - cached.height);
@@ -226,31 +226,31 @@ function renderSeatIndicators(
   offsetY: number,
   zoom: number,
 ): void {
-  if (selectedAgentId === null || !hoveredTile) return;
+  if (selectedAgentId === null) return;
   const selectedChar = characters.get(selectedAgentId);
   if (!selectedChar) return;
 
-  // Only show indicator for the hovered seat tile
+  // Show color-coded indicators on ALL seats when an agent is selected:
+  //   blue  = selected agent's own seat
+  //   green = free seat
+  //   red   = seat assigned to another agent
+  const s = TILE_SIZE * zoom;
   for (const [uid, seat] of seats) {
-    if (seat.seatCol !== hoveredTile.col || seat.seatRow !== hoveredTile.row) continue;
-
-    const s = TILE_SIZE * zoom;
     const x = offsetX + seat.seatCol * s;
     const y = offsetY + seat.seatRow * s;
 
     if (selectedChar.seatId === uid) {
-      // Selected agent's own seat — blue
       ctx.fillStyle = SEAT_OWN_COLOR;
     } else if (!seat.assigned) {
-      // Available seat — green
       ctx.fillStyle = SEAT_AVAILABLE_COLOR;
     } else {
-      // Busy (assigned to another agent) — red
       ctx.fillStyle = SEAT_BUSY_COLOR;
     }
     ctx.fillRect(x, y, s, s);
-    break;
   }
+
+  // Keep the hoveredTile parameter in signature for future use (cursor hints)
+  void hoveredTile;
 }
 
 // ── Edit mode overlays ──────────────────────────────────────────

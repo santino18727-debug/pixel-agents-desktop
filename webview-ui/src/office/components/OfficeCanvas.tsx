@@ -775,8 +775,16 @@ export function OfficeCanvas({
             onZoomChange(newZoom);
           }
         }
+      } else if (e.shiftKey) {
+        // Shift+wheel -> horizontal pan only (deltaY maps to X axis)
+        const dpr = window.devicePixelRatio || 1;
+        officeState.cameraFollowId = null;
+        panRef.current = clampPan(
+          panRef.current.x - e.deltaY * dpr,
+          panRef.current.y,
+        );
       } else {
-        // Pan via trackpad two-finger scroll or mouse wheel
+        // Plain wheel / trackpad two-finger scroll -> pan X and Y
         const dpr = window.devicePixelRatio || 1;
         officeState.cameraFollowId = null;
         panRef.current = clampPan(

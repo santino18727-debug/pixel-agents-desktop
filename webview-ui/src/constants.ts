@@ -13,12 +13,14 @@ export const MAX_ROWS = 64;
 export const WALK_SPEED_PX_PER_SEC = 48;
 export const WALK_FRAME_DURATION_SEC = 0.15;
 export const TYPE_FRAME_DURATION_SEC = 0.3;
-export const WANDER_PAUSE_MIN_SEC = 2.0;
-export const WANDER_PAUSE_MAX_SEC = 20.0;
-export const WANDER_MOVES_BEFORE_REST_MIN = 3;
-export const WANDER_MOVES_BEFORE_REST_MAX = 6;
-export const SEAT_REST_MIN_SEC = 120.0;
-export const SEAT_REST_MAX_SEC = 240.0;
+export const WANDER_PAUSE_MIN_SEC = 3.0;
+export const WANDER_PAUSE_MAX_SEC = 12.0;
+export const WANDER_MOVES_BEFORE_REST_MIN = 2;
+export const WANDER_MOVES_BEFORE_REST_MAX = 5;
+export const SEAT_REST_MIN_SEC = 20.0;
+export const SEAT_REST_MAX_SEC = 45.0;
+export const BREAK_DURATION_MIN_SEC = 15.0;
+export const BREAK_DURATION_MAX_SEC = 40.0;
 
 // ── Matrix Effect ────────────────────────────────────────────
 export const MATRIX_EFFECT_DURATION_SEC = 0.3;
@@ -57,9 +59,9 @@ export const BUBBLE_VERTICAL_OFFSET_PX = 24;
 export const FALLBACK_FLOOR_COLOR = '#808080';
 
 // ── Rendering - Overlay Colors (canvas, not CSS) ─────────────
-export const SEAT_OWN_COLOR = 'rgba(0, 127, 212, 0.35)';
-export const SEAT_AVAILABLE_COLOR = 'rgba(0, 200, 80, 0.35)';
-export const SEAT_BUSY_COLOR = 'rgba(220, 50, 50, 0.35)';
+export const SEAT_OWN_COLOR = 'rgba(68, 136, 255, 0.5)';
+export const SEAT_AVAILABLE_COLOR = 'rgba(68, 255, 136, 0.4)';
+export const SEAT_BUSY_COLOR = 'rgba(255, 68, 68, 0.4)';
 export const GRID_LINE_COLOR = 'rgba(255,255,255,0.12)';
 export const VOID_TILE_OUTLINE_COLOR = 'rgba(255,255,255,0.08)';
 export const VOID_TILE_DASH_PATTERN: [number, number] = [2, 2];

@@ -22,7 +22,7 @@ import {
   layoutToSeats,
   layoutToTileMap,
 } from '../layout/layoutSerializer.js';
-import { findPath, getWalkableTiles, isWalkable } from '../layout/tileMap.js';
+import { findPath, getIdleZoneTiles, getWalkableTiles, isWalkable } from '../layout/tileMap.js';
 import { getLoadedCharacterCount } from '../sprites/spriteData.js';
 import type {
   Character,
@@ -32,7 +32,14 @@ import type {
   Seat,
   TileType as TileTypeVal,
 } from '../types.js';
-import { CharacterState, Direction, MATRIX_EFFECT_DURATION, TILE_SIZE } from '../types.js';
+import { CharacterState, Direction, MATRIX_EFFECT_DURATION, TILE_SIZE, TileType } from '../types.js';
+
+/** Floor types considered "idle zones" — lounge (1/blue), meeting (3/green), break (9/checkered) */
+const IDLE_ZONE_TYPES: ReadonlySet<number> = new Set([
+  TileType.FLOOR_1,
+  TileType.FLOOR_3,
+  TileType.FLOOR_9,
+]);
 import { createCharacter, updateCharacter } from './characters.js';
 import { matrixEffectSeeds } from './matrixEffect.js';
 
@@ -43,6 +50,7 @@ export class OfficeState {
   blockedTiles: Set<string>;
   furniture: FurnitureInstance[];
   walkableTiles: Array<{ col: number; row: number }>;
+  idleZoneTiles: Array<{ col: number; row: number }>;
   characters: Map<number, Character> = new Map();
   /** Accumulated time for furniture animation frame cycling */
   furnitureAnimTimer = 0;
@@ -63,6 +71,7 @@ export class OfficeState {
     this.blockedTiles = getBlockedTiles(this.layout.furniture);
     this.furniture = layoutToFurnitureInstances(this.layout.furniture);
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles);
+    this.idleZoneTiles = getIdleZoneTiles(this.tileMap, this.blockedTiles, IDLE_ZONE_TYPES);
   }
 
   /** Rebuild all derived state from a new layout. Reassigns existing characters.
@@ -74,6 +83,7 @@ export class OfficeState {
     this.blockedTiles = getBlockedTiles(layout.furniture);
     this.rebuildFurnitureInstances();
     this.walkableTiles = getWalkableTiles(this.tileMap, this.blockedTiles);
+    this.idleZoneTiles = getIdleZoneTiles(this.tileMap, this.blockedTiles, IDLE_ZONE_TYPES);
 
     // Shift character positions when grid expands left/up
     if (shift && (shift.col !== 0 || shift.row !== 0)) {
@@ -564,6 +574,7 @@ export class OfficeState {
     const ch = this.characters.get(id);
     if (ch) {
       ch.isActive = active;
+      ch.activeIdleTimer = 0; // reset on any activity change
       if (!active) {
         // Sentinel -1: signals turn just ended, skip next seat rest timer.
         // Prevents the WALK handler from setting a 2-4 min rest on arrival.
@@ -741,9 +752,23 @@ export class OfficeState {
         continue; // skip normal FSM while effect is active
       }
 
+      // Auto-idle: if active but no tool event in 90s, start wandering
+      const AUTO_IDLE_SEC = 90;
+      if (ch.isActive) {
+        ch.activeIdleTimer += dt;
+        if (ch.activeIdleTimer >= AUTO_IDLE_SEC) {
+          ch.isActive = false;
+          ch.activeIdleTimer = 0;
+          ch.seatTimer = -1;
+          ch.path = [];
+          ch.moveProgress = 0;
+          this.rebuildFurnitureInstances();
+        }
+      }
+
       // Temporarily unblock own seat so character can pathfind to it
       this.withOwnSeatUnblocked(ch, () =>
-        updateCharacter(ch, dt, this.walkableTiles, this.seats, this.tileMap, this.blockedTiles),
+        updateCharacter(ch, dt, this.walkableTiles, this.idleZoneTiles, this.seats, this.tileMap, this.blockedTiles),
       );
 
       // Tick bubble timer for waiting bubbles
@@ -773,7 +798,7 @@ export class OfficeState {
       if (ch.matrixEffect === 'despawn') continue;
       // Character sprite is 16x24, anchored bottom-center
       // Apply sitting offset to match visual position
-      const sittingOffset = ch.state === CharacterState.TYPE ? CHARACTER_SITTING_OFFSET_PX : 0;
+      const sittingOffset = (ch.state === CharacterState.TYPE || ch.state === CharacterState.BREAK) ? CHARACTER_SITTING_OFFSET_PX : 0;
       const anchorY = ch.y + sittingOffset;
       const left = ch.x - CHARACTER_HIT_HALF_WIDTH;
       const right = ch.x + CHARACTER_HIT_HALF_WIDTH;

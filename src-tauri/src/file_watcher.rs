@@ -218,13 +218,14 @@ fn seed_offsets(_projects_root: &PathBuf, offsets: &TailOffsets) {
 
 fn translate_to_frontend_messages(event: &AgentEvent, agent_id: usize) -> Vec<serde_json::Value> {
     match event {
-        AgentEvent::ToolUse { id, tool, .. } => {
+        AgentEvent::ToolUse { id, tool, input } => {
             vec![json!({
                 "type": "agentToolStart",
                 "id": agent_id,
                 "toolId": id,
                 "status": format!("Using {}...", tool),
                 "toolName": tool,
+                "toolInput": input,
             })]
         }
         AgentEvent::ToolResult { id, .. } => {

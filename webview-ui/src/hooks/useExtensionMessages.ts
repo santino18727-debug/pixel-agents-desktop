@@ -8,7 +8,7 @@ import { setFloorSprites } from '../office/floorTiles.js';
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js';
 import { setCharacterTemplates } from '../office/sprites/spriteData.js';
-import { extractToolName } from '../office/toolUtils.js';
+import { enrichToolStatus, extractToolName } from '../office/toolUtils.js';
 import type { OfficeLayout, ToolActivity } from '../office/types.js';
 import { setWallSprites } from '../office/wallTiles.js';
 import { vscode } from '../vscodeApi.js';
@@ -131,7 +131,6 @@ export function useExtensionMessages(
 
     const handleLayoutLoaded = (msg: Msg, os: OfficeState) => {
       if (layoutReadyRef.current && isEditDirty?.()) {
-        console.log('[Webview] Skipping external layout update — editor has unsaved changes');
         return;
       }
       const rawLayout = msg.layout as OfficeLayout | null;
@@ -226,20 +225,23 @@ export function useExtensionMessages(
     const handleAgentToolStart = (msg: Msg, os: OfficeState) => {
       const id = msg.id as number;
       const toolId = msg.toolId as string;
-      const status = msg.status as string;
+      const toolName = (msg.toolName as string | undefined) ?? '';
+      const toolInput = (msg.toolInput as Record<string, unknown> | undefined) ?? undefined;
+      const rawStatus = msg.status as string;
       const permissionActive = msg.permissionActive as boolean | undefined;
+      const status = enrichToolStatus(toolName || rawStatus, toolInput);
       setAgentTools((prev) => {
         const list = prev[id] || [];
         if (list.some((t) => t.toolId === toolId)) return prev;
         return { ...prev, [id]: [...list, { toolId, status, done: false, permissionWait: permissionActive || false }] };
       });
-      const toolName = (msg.toolName as string | undefined) ?? extractToolName(status);
-      os.setAgentTool(id, toolName);
+      const effectiveToolName = toolName || extractToolName(rawStatus) || '';
+      os.setAgentTool(id, effectiveToolName);
       os.setAgentActive(id, true);
       if (!permissionActive) os.clearPermissionBubble(id);
       const runInBackground = msg.runInBackground as boolean | undefined;
-      if ((toolName === 'Task' || toolName === 'Agent') && !runInBackground && !toolId.startsWith('hook-')) {
-        const label = status.startsWith('Subtask:') ? status.slice('Subtask:'.length).trim() : '';
+      if ((effectiveToolName === 'Task' || effectiveToolName === 'Agent') && !runInBackground && !toolId.startsWith('hook-')) {
+        const label = rawStatus.startsWith('Subtask:') ? rawStatus.slice('Subtask:'.length).trim() : '';
         const subId = os.addSubagent(id, toolId);
         setSubagentCharacters((prev) => {
           if (prev.some((s) => s.id === subId)) return prev;
@@ -306,7 +308,10 @@ export function useExtensionMessages(
       const id = msg.id as number;
       const parentToolId = msg.parentToolId as string;
       const toolId = msg.toolId as string;
-      const status = msg.status as string;
+      const subToolName = (msg.toolName as string | undefined) ?? '';
+      const subToolInput = (msg.toolInput as Record<string, unknown> | undefined) ?? undefined;
+      const rawSubStatus = msg.status as string;
+      const status = enrichToolStatus(subToolName || rawSubStatus, subToolInput);
       setSubagentTools((prev) => {
         const agentSubs = prev[id] || {};
         const list = agentSubs[parentToolId] || [];
@@ -314,7 +319,7 @@ export function useExtensionMessages(
         return { ...prev, [id]: { ...agentSubs, [parentToolId]: [...list, { toolId, status, done: false }] } };
       });
       const subId = os.getSubagentId(id, parentToolId);
-      if (subId !== null) { os.setAgentTool(subId, extractToolName(status)); os.setAgentActive(subId, true); }
+      if (subId !== null) { os.setAgentTool(subId, subToolName || extractToolName(rawSubStatus)); os.setAgentActive(subId, true); }
     };
 
     const handleSubagentToolDone = (msg: Msg) => {
@@ -347,19 +352,16 @@ export function useExtensionMessages(
 
     const handleCharacterSpritesLoaded = (msg: Msg) => {
       const chars = msg.characters as Array<{ down: string[][][]; up: string[][][]; right: string[][][] }>;
-      console.log(`[Webview] Received ${chars.length} pre-colored character sprites`);
       setCharacterTemplates(chars);
     };
 
     const handleFloorTilesLoaded = (msg: Msg) => {
       const sprites = msg.sprites as string[][][];
-      console.log(`[Webview] Received ${sprites.length} floor tile patterns`);
       setFloorSprites(sprites);
     };
 
     const handleWallTilesLoaded = (msg: Msg) => {
       const sets = msg.sets as string[][][][];
-      console.log(`[Webview] Received ${sets.length} wall tile set(s)`);
       setWallSprites(sets);
     };
 
@@ -367,7 +369,6 @@ export function useExtensionMessages(
       try {
         const catalog = msg.catalog as FurnitureAsset[];
         const sprites = msg.sprites as Record<string, string[][]>;
-        console.log(`[Webview] Loaded ${catalog.length} furniture assets`);
         buildDynamicCatalog({ catalog, sprites });
         setLoadedAssets({ catalog, sprites });
       } catch (err) {

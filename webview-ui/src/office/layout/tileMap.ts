@@ -36,6 +36,25 @@ export function getWalkableTiles(
   return tiles;
 }
 
+/** Get walkable tiles restricted to specific floor types (lounge, meeting, break areas). */
+export function getIdleZoneTiles(
+  tileMap: TileType[][],
+  blockedTiles: Set<string>,
+  zoneTypes: ReadonlySet<number>,
+): Array<{ col: number; row: number }> {
+  const rows = tileMap.length;
+  const cols = rows > 0 ? tileMap[0].length : 0;
+  const tiles: Array<{ col: number; row: number }> = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      if (zoneTypes.has(tileMap[r][c]) && isWalkable(c, r, tileMap, blockedTiles)) {
+        tiles.push({ col: c, row: r });
+      }
+    }
+  }
+  return tiles;
+}
+
 /** BFS pathfinding on 4-connected grid (no diagonals). Returns path excluding start, including end. */
 export function findPath(
   startCol: number,

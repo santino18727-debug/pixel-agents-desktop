@@ -39,6 +39,10 @@ pub struct Settings {
     /// Maximum number of sessions to display (default 20, max 100).
     #[serde(default = "default_max_sessions")]
     pub max_sessions: usize,
+
+    /// Whether Claude hooks are enabled.
+    #[serde(default = "default_hooks_enabled")]
+    pub hooks_enabled: bool,
 }
 
 impl Default for Settings {
@@ -51,6 +55,7 @@ impl Default for Settings {
             theme: default_theme(),
             external_asset_directories: Vec::new(),
             max_sessions: default_max_sessions(),
+            hooks_enabled: default_hooks_enabled(),
         }
     }
 }
@@ -65,6 +70,10 @@ fn default_theme() -> String {
 
 fn default_max_sessions() -> usize {
     20
+}
+
+fn default_hooks_enabled() -> bool {
+    true
 }
 
 /// Tauri command — returns the current settings (or defaults if not yet stored).
@@ -82,15 +91,25 @@ pub fn get_settings(app: AppHandle) -> Result<Settings, String> {
     Ok(settings)
 }
 
-/// Tauri command — persists updated settings.
+/// Tauri command — persists updated settings (partial merge).
 #[tauri::command]
-pub fn set_settings(app: AppHandle, settings: Settings) -> Result<(), String> {
+pub fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let store = app
         .store(STORE_FILE)
         .map_err(|e| format!("Failed to open store: {e}"))?;
 
-    let value = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
-    store.set(SETTINGS_KEY, value);
+    let mut current: serde_json::Value = store
+        .get(SETTINGS_KEY)
+        .unwrap_or_else(|| serde_json::to_value(Settings::default()).unwrap());
+
+    if let (Some(obj), Some(patch)) = (current.as_object_mut(), settings.as_object()) {
+        for (k, v) in patch {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+
+    let _validated: Settings = serde_json::from_value(current.clone()).map_err(|e| e.to_string())?;
+    store.set(SETTINGS_KEY, current);
 
     if let Err(e) = store.save() {
         warn!("Failed to flush settings to disk: {e}");

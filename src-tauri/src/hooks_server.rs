@@ -157,12 +157,14 @@ fn handle_connection(
                 .get("tool_name")
                 .and_then(Value::as_str)
                 .unwrap_or("unknown");
+            let tool_input = payload.get("tool_input").cloned().unwrap_or(Value::Null);
             Some(json!({
                 "type": "agentToolStart",
                 "id": agent_id,
                 "toolId": format!("hook-{}", session_id),
                 "status": format!("Using {}...", tool),
                 "toolName": tool,
+                "toolInput": tool_input,
             }))
         }
         "PostToolUse" => {

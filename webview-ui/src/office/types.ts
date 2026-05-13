@@ -32,6 +32,7 @@ export const CharacterState = {
   IDLE: 'idle',
   WALK: 'walk',
   TYPE: 'type',
+  BREAK: 'break',
 } as const;
 export type CharacterState = (typeof CharacterState)[keyof typeof CharacterState];
 
@@ -198,4 +199,6 @@ export interface Character {
   inputTokens: number;
   /** Cumulative output tokens consumed */
   outputTokens: number;
+  /** Seconds spent continuously active without a tool event — auto-idles when threshold exceeded */
+  activeIdleTimer: number;
 }

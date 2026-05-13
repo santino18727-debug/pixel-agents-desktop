@@ -1,6 +1,8 @@
 // Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
 // Licensed under MIT
 import {
+  BREAK_DURATION_MAX_SEC,
+  BREAK_DURATION_MIN_SEC,
   SEAT_REST_MAX_SEC,
   SEAT_REST_MIN_SEC,
   TYPE_FRAME_DURATION_SEC,
@@ -88,13 +90,22 @@ export function createCharacter(
     matrixEffectSeeds: [],
     inputTokens: 0,
     outputTokens: 0,
+    activeIdleTimer: 0,
   };
+}
+
+/** Floor types considered "break zones" — lounge (1), meeting (3), break area (9) */
+const BREAK_ZONE_TILE_TYPES = new Set([1, 3, 9]);
+
+function isOnBreakZone(ch: Character, tileMap: TileTypeVal[][]): boolean {
+  return BREAK_ZONE_TILE_TYPES.has(tileMap[ch.tileRow]?.[ch.tileCol] ?? -1);
 }
 
 export function updateCharacter(
   ch: Character,
   dt: number,
   walkableTiles: Array<{ col: number; row: number }>,
+  idleZoneTiles: Array<{ col: number; row: number }>,
   seats: Map<string, Seat>,
   tileMap: TileTypeVal[][],
   blockedTiles: Set<string>,
@@ -188,8 +199,11 @@ export function updateCharacter(
             }
           }
         }
-        if (walkableTiles.length > 0) {
-          const target = walkableTiles[Math.floor(Math.random() * walkableTiles.length)];
+        // 70% chance: target break/lounge/meeting zones; 30%: any walkable tile
+        const preferZone = idleZoneTiles.length > 0 && Math.random() < 0.7;
+        const pool = preferZone ? idleZoneTiles : walkableTiles;
+        if (pool.length > 0) {
+          const target = pool[Math.floor(Math.random() * pool.length)];
           const path = findPath(
             ch.tileCol,
             ch.tileRow,
@@ -262,8 +276,14 @@ export function updateCharacter(
               break;
             }
           }
-          ch.state = CharacterState.IDLE;
-          ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC);
+          // Arrived in break zone while idle → sit/read for a while
+          if (isOnBreakZone(ch, tileMap)) {
+            ch.state = CharacterState.BREAK;
+            ch.wanderTimer = randomRange(BREAK_DURATION_MIN_SEC, BREAK_DURATION_MAX_SEC);
+          } else {
+            ch.state = CharacterState.IDLE;
+            ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC);
+          }
         }
         ch.frame = 0;
         ch.frameTimer = 0;
@@ -315,6 +335,24 @@ export function updateCharacter(
       }
       break;
     }
+
+    case CharacterState.BREAK: {
+      if (ch.frameTimer >= TYPE_FRAME_DURATION_SEC) {
+        ch.frameTimer -= TYPE_FRAME_DURATION_SEC;
+        ch.frame = (ch.frame + 1) % 2;
+      }
+      if (ch.isActive) {
+        ch.state = CharacterState.IDLE;
+        break;
+      }
+      ch.wanderTimer -= dt;
+      if (ch.wanderTimer <= 0) {
+        ch.wanderCount++;
+        ch.state = CharacterState.IDLE;
+        ch.wanderTimer = randomRange(WANDER_PAUSE_MIN_SEC, WANDER_PAUSE_MAX_SEC);
+      }
+      break;
+    }
   }
 }
 
@@ -328,6 +366,8 @@ export function getCharacterSprite(ch: Character, sprites: CharacterSprites): Sp
       return sprites.typing[ch.dir][ch.frame % 2];
     case CharacterState.WALK:
       return sprites.walk[ch.dir][ch.frame % 4];
+    case CharacterState.BREAK:
+      return sprites.reading[ch.dir][ch.frame % 2];
     case CharacterState.IDLE:
       return sprites.walk[ch.dir][1];
     default:
