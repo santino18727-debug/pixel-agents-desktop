@@ -63,10 +63,8 @@ pub fn start_watcher(
 
     {
         if let Ok(sessions) = scan_projects() {
-            let main_sessions: Vec<_> = sessions
-                .into_iter()
-                .filter(|s| !s.is_subagent)
-                .collect();
+            let main_sessions: Vec<_> = sessions.iter().filter(|s| !s.is_subagent).cloned().collect();
+            let sub_sessions: Vec<_> = sessions.iter().filter(|s| s.is_subagent).cloned().collect();
 
             // Load persisted session → agent_id mapping so IDs are stable across restarts.
             let persisted_map = session_map::load();
@@ -89,7 +87,20 @@ pub fn start_watcher(
                 cache.insert(session.session_id.clone(), session.modified_secs);
                 cancel_map.insert(agent_id, Arc::new(AtomicBool::new(false)));
             }
-            *next_id = next_sequential;
+
+            // Register sub-agents with IDs matching the vscode-shim bootstrap formula:
+            // subId = mainSessions.length + subIdx + 1  (same as vscode-shim.ts line ~144).
+            // This ensures Rust events (agentToolStart, agentStatus…) carry the same ID
+            // as the character the frontend created at startup.
+            let main_count = main_sessions.len();
+            for (sub_idx, sub) in sub_sessions.iter().enumerate() {
+                let sub_id = main_count + sub_idx + 1;
+                map.insert(sub.session_id.clone(), sub_id);
+                cache.insert(sub.session_id.clone(), sub.modified_secs);
+            }
+
+            // next_id must be above every assigned ID so new live sessions don't collide.
+            *next_id = next_sequential.max(main_count + sub_sessions.len() + 1);
 
             // Persist the updated map so new sessions are stable on next launch.
             session_map::save(&map);
