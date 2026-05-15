@@ -33,3 +33,20 @@ pub fn save(map: &HashMap<String, usize>) {
         let _ = std::fs::write(&path, json);
     }
 }
+
+/// Removes expired session IDs from the persisted map.
+/// Called by the expiry monitor after emitting agentClosed so that the
+/// session-map.json file does not accumulate stale entries indefinitely.
+pub fn remove_expired(expired_ids: &[String]) {
+    if expired_ids.is_empty() {
+        return;
+    }
+    let mut map = load();
+    let before = map.len();
+    for id in expired_ids {
+        map.remove(id);
+    }
+    if map.len() != before {
+        save(&map);
+    }
+}

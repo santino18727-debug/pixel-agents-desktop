@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use tauri::AppHandle;
+use tauri::{AppHandle, Manager};
 use tauri_plugin_store::StoreExt;
 use tracing::warn;
 
@@ -92,6 +92,7 @@ pub fn get_settings(app: AppHandle) -> Result<Settings, String> {
 }
 
 /// Tauri command — persists updated settings (partial merge).
+/// Applies alwaysOnTop immediately to the main window when the setting changes.
 #[tauri::command]
 pub fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), String> {
     let store = app
@@ -108,11 +109,18 @@ pub fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), S
         }
     }
 
-    let _validated: Settings = serde_json::from_value(current.clone()).map_err(|e| e.to_string())?;
+    let validated: Settings = serde_json::from_value(current.clone()).map_err(|e| e.to_string())?;
     store.set(SETTINGS_KEY, current);
 
     if let Err(e) = store.save() {
         warn!("Failed to flush settings to disk: {e}");
+    }
+
+    // Apply alwaysOnTop immediately so the user sees the effect without restart.
+    if let Some(win) = app.get_webview_window("main") {
+        if let Err(e) = win.set_always_on_top(validated.always_on_top) {
+            warn!("Failed to apply always_on_top={}: {e}", validated.always_on_top);
+        }
     }
 
     Ok(())

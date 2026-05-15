@@ -23,6 +23,9 @@ pub struct SessionMeta {
     pub jsonl_path: String,
     /// Unix timestamp (seconds) of last modification, or 0 if unavailable.
     pub modified_secs: u64,
+    /// Resolved frontend agent ID from the persisted session map.
+    /// None if the session has not been seen by the file watcher yet.
+    pub agent_id: Option<usize>,
 }
 
 /// Shared, thread-safe session registry.
@@ -146,14 +149,21 @@ fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> 
         parent_session_id,
         jsonl_path: jsonl_path.to_string_lossy().into_owned(),
         modified_secs,
+        agent_id: None,
     })
 }
 
 /// Tauri command -- returns sessions modified within the last  hours.
 /// Defaults to 24h. Returns at most  sessions (default 20).
+/// Populates agent_id from the shared session-agent map so the frontend
+/// uses the same IDs as the file watcher (avoids idle-forever mismatch).
 #[tauri::command]
 pub fn list_sessions(
     registry: tauri::State<'_, SessionRegistry>,
+    agent_map: tauri::State<
+        '_,
+        std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, usize>>>,
+    >,
     max_age_hours: Option<u64>,
     limit: Option<usize>,
 ) -> Vec<SessionMeta> {
@@ -165,13 +175,19 @@ pub fn list_sessions(
         .map(|d| d.as_secs().saturating_sub(max_age * 3600))
         .unwrap_or(0);
 
+    let map = agent_map.lock().unwrap_or_else(|e| e.into_inner());
+
     registry
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .iter()
         .filter(|s| s.modified_secs >= cutoff)
         .take(limit)
-        .cloned()
+        .map(|s| {
+            let mut s = s.clone();
+            s.agent_id = map.get(&s.session_id).copied();
+            s
+        })
         .collect()
 }
 

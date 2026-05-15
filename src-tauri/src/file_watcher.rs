@@ -189,13 +189,17 @@ pub fn start_watcher(
                     .filter(|(sid, _)| !active_ids.contains(*sid))
                     .map(|(k, &v)| (k.clone(), v))
                     .collect();
-                for (session_id, agent_id) in expired {
-                    map.remove(&session_id);
+                let expired_ids: Vec<String> = expired.iter().map(|(id, _)| id.clone()).collect();
+                for (session_id, agent_id) in &expired {
+                    map.remove(session_id);
                     let msg = serde_json::json!({ "type": "agentClosed", "id": agent_id });
                     if let Err(e) = app_expiry.emit("agent-event", &msg) {
                         warn!("Failed to emit agentClosed for {session_id}: {e}");
                     }
                 }
+                // Persist expiry: remove stale entries from session-map.json (I2).
+                drop(map);
+                session_map::remove_expired(&expired_ids);
             }
         });
     }

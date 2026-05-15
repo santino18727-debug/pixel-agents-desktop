@@ -20,6 +20,45 @@ use tauri::Manager;
 use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 use tracing::error;
 
+/// Tauri command — opens ~/.claude/projects/ in the system file explorer.
+/// Silently no-ops if the directory doesn't exist yet.
+#[tauri::command]
+fn open_sessions_folder() -> Result<(), String> {
+    let home = dirs::home_dir().ok_or("Cannot resolve home directory")?;
+    let projects_root = home.join(".claude").join("projects");
+
+    // Create the directory if absent so the shell opener doesn't error.
+    if !projects_root.exists() {
+        std::fs::create_dir_all(&projects_root)
+            .map_err(|e| format!("Failed to create sessions folder: {e}"))?;
+    }
+
+    // Use the opener plugin (or fall back to platform shell command).
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(projects_root.to_string_lossy().as_ref())
+            .spawn()
+            .map_err(|e| format!("Failed to open explorer: {e}"))?;
+    }
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(projects_root.to_string_lossy().as_ref())
+            .spawn()
+            .map_err(|e| format!("Failed to open finder: {e}"))?;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(projects_root.to_string_lossy().as_ref())
+            .spawn()
+            .map_err(|e| format!("Failed to open file manager: {e}"))?;
+    }
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -30,11 +69,13 @@ pub fn run() {
         .init();
 
     let registry = new_registry();
+    let session_agent_map = file_watcher::new_session_agent_map();
 
     tauri::Builder::default()
         .plugin(tauri_plugin_store::Builder::default().build())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(registry.clone())
+        .manage(session_agent_map.clone())
         .invoke_handler(tauri::generate_handler![
             list_sessions,
             get_settings,
@@ -42,6 +83,7 @@ pub fn run() {
             save_layout,
             load_layout,
             asset_loader::scan_external_assets,
+            open_sessions_folder,
         ])
         .setup(move |app| {
             // Restore saved window size and position (tauri-plugin-window-state).
@@ -117,9 +159,8 @@ pub fn run() {
             // F2: Watch layout.json for external manual edits.
             layout_persistence::start_layout_watcher(app.handle().clone());
 
-            // F1 + F3: Create the shared SessionAgentMap so both the file watcher
-            // and the hooks server can resolve session_id -> agent_id.
-            let session_agent_map = file_watcher::new_session_agent_map();
+            // session_agent_map is created before setup() and managed as Tauri state
+            // so list_sessions can resolve the correct agent IDs for the frontend.
 
             // Generate a per-session token for the hooks server.
             // Expose it as an env var so Claude Code hooks config can read it.

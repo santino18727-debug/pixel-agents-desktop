@@ -31,7 +31,11 @@ pub fn start(app: AppHandle, session_agent_map: SessionAgentMap, expected_token:
     let listener = match TcpListener::bind(BIND_ADDR) {
         Ok(l) => l,
         Err(e) => {
-            warn!("hooks_server: failed to bind {BIND_ADDR}: {e}");
+            // Log at error level — hooks won't work, user should know.
+            tracing::error!(
+                "hooks_server: failed to bind {BIND_ADDR}: {e}. \
+                 Check that no other process is using port 17317."
+            );
             return;
         }
     };
@@ -39,12 +43,12 @@ pub fn start(app: AppHandle, session_agent_map: SessionAgentMap, expected_token:
 
     for stream in listener.incoming() {
         match stream {
-            Ok(mut stream) => {
+            Ok(stream) => {
                 let app2 = app.clone();
                 let map2 = Arc::clone(&session_agent_map);
                 let token = expected_token.clone();
                 std::thread::spawn(move || {
-                    handle_connection(&mut stream, &app2, &map2, &token);
+                    handle_connection(stream, &app2, &map2, &token);
                 });
             }
             Err(e) => warn!("hooks_server: accept error: {e}"),
@@ -52,8 +56,10 @@ pub fn start(app: AppHandle, session_agent_map: SessionAgentMap, expected_token:
     }
 }
 
+/// Handle one incoming HTTP connection.
+/// Takes ownership of the stream to avoid try_clone and the associated panic risk.
 fn handle_connection(
-    stream: &mut std::net::TcpStream,
+    stream: std::net::TcpStream,
     app: &AppHandle,
     session_agent_map: &SessionAgentMap,
     expected_token: &str,
@@ -61,9 +67,17 @@ fn handle_connection(
     // 30-second read timeout prevents slow-loris style hangs.
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
 
-    let mut reader = BufReader::new(stream.try_clone().unwrap_or_else(|_| {
-        panic!("hooks_server: stream clone failed");
-    }));
+    // Clone the stream for writing; if this fails, log and bail — never panic.
+    let write_stream = match stream.try_clone() {
+        Ok(s) => s,
+        Err(e) => {
+            warn!("hooks_server: stream clone failed: {e}");
+            return;
+        }
+    };
+
+    let mut writer = std::io::BufWriter::new(write_stream);
+    let mut reader = BufReader::new(stream);
 
     // Parse HTTP request line.
     let mut request_line = String::new();
@@ -95,7 +109,7 @@ fn handle_connection(
     // Reject requests with missing or wrong token.
     if received_token != expected_token {
         warn!("hooks_server: rejected request — invalid or missing X-Hook-Token");
-        let _ = stream.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+        let _ = writer.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
         return;
     }
 
@@ -110,12 +124,14 @@ fn handle_connection(
     let is_post_hook = request_line.starts_with("POST /hook");
 
     // Write HTTP response with proper CRLF line endings (RFC 7230).
+    // Body is valid JSON: "ok" (4 bytes with quotes).
     let response = if is_post_hook {
-        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Type: application/json\r\n\r\nok"
+        "HTTP/1.1 200 OK\r\nContent-Length: 4\r\nContent-Type: application/json\r\n\r\n\"ok\""
     } else {
         "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n"
     };
-    let _ = stream.write_all(response.as_bytes());
+    let _ = writer.write_all(response.as_bytes());
+    let _ = writer.flush();
 
     if !is_post_hook {
         return;

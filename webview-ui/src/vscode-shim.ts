@@ -50,6 +50,8 @@ async function bootstrap(): Promise<void> {
       parent_session_id: string | null;
       jsonl_path: string;
       modified_secs: number;
+      /** Resolved agent ID from the persisted session map. Null if session is new. */
+      agent_id: number | null;
     };
 
     type PersistedSettings = {
@@ -113,10 +115,13 @@ async function bootstrap(): Promise<void> {
 
     const mainSessions = sessions.filter((s) => !s.is_subagent);
     if (mainSessions.length > 0) {
-      const agentIds = mainSessions.map((_, i) => i + 1);
+      // Use backend-resolved agent_id so IDs match what the file watcher emits.
+      // Fall back to sequential if the session is brand-new (not yet in persisted map).
+      const agentIds = mainSessions.map((s, i) => s.agent_id ?? (i + 1));
       const folderNames: Record<number, string> = {};
       mainSessions.forEach((s, i) => {
-        folderNames[i + 1] = s.folder_name || s.project_dir.split(/[\/]/).pop() || s.project_dir;
+        const agentId = s.agent_id ?? (i + 1);
+        folderNames[agentId] = s.folder_name || s.project_dir.split(/[\/]/).pop() || s.project_dir;
       });
       dispatch({
         type: "existingAgents",
@@ -127,8 +132,8 @@ async function bootstrap(): Promise<void> {
 
       // Always start existing sessions as idle at boot — the file watcher will quickly
       // re-activate characters if Claude Code is actively running tools.
-      mainSessions.forEach((_s, i) => {
-        dispatch({ type: "agentStatus", id: i + 1, status: "idle" });
+      mainSessions.forEach((s, i) => {
+        dispatch({ type: "agentStatus", id: s.agent_id ?? (i + 1), status: "idle" });
       });
       // P2: dispatch workspaceFolders so the frontend can display folder names per agent.
       dispatch({
@@ -140,15 +145,14 @@ async function bootstrap(): Promise<void> {
       });
 
       // Dispatch existing sub-agents as agentCreated with isTeammate: true.
-      // IDs continue the sequence after mainSessions (1-based).
       const subSessions = sessions.filter((s) => s.is_subagent);
       subSessions.forEach((sub, subIdx) => {
         const parentSession = mainSessions.find(
           (m) => m.session_id === sub.parent_session_id,
         );
         if (!parentSession) return; // parent not found — skip silently
-        const parentId = mainSessions.indexOf(parentSession) + 1;
-        const subId = mainSessions.length + subIdx + 1;
+        const parentId = parentSession.agent_id ?? (mainSessions.indexOf(parentSession) + 1);
+        const subId = sub.agent_id ?? (mainSessions.length + subIdx + 1);
         dispatch({
           type: "agentCreated",
           id: subId,

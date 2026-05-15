@@ -111,7 +111,15 @@ fn extract_content_block(v: &Value) -> Option<AgentEvent> {
     match msg_type {
         "assistant" => {
             let message = v.get("message")?;
-            // Emit TokenUsage if the assistant message carries a usage object.
+            // Prefer tool/text content over token usage so agentToolStart is never
+            // dropped in favour of a TokenUsage event from the same message (C3).
+            let content = message.get("content");
+            if let Some(c) = content {
+                if let Some(event) = extract_from_content(c) {
+                    return Some(event);
+                }
+            }
+            // No actionable content -- fall back to token usage if present.
             if let Some(usage) = message.get("usage") {
                 let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
                 let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
@@ -122,8 +130,7 @@ fn extract_content_block(v: &Value) -> Option<AgentEvent> {
                     });
                 }
             }
-            let content = message.get("content")?;
-            extract_from_content(content)
+            None
         }
         "user" => {
             let content = v.get("message")?.get("content")?;
@@ -298,6 +305,35 @@ mod tests {
         match parsed.event {
             AgentEvent::System { subtype, .. } => assert_eq!(subtype, "init"),
             other => panic!("Expected System, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tool_use_takes_priority_over_token_usage_in_same_message() {
+        // C3: when an assistant message contains both usage and tool_use content,
+        // ToolUse must win -- never silently dropped in favour of TokenUsage.
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tu_c3","name":"Read","input":{"file_path":"/tmp/x"}}],"usage":{"input_tokens":100,"output_tokens":50}},"uuid":"abc"}"#;
+        let parsed = parse_line("sess-1", line).expect("should parse");
+        match parsed.event {
+            AgentEvent::ToolUse { id, tool, .. } => {
+                assert_eq!(id, "tu_c3");
+                assert_eq!(tool, "Read");
+            }
+            other => panic!("Expected ToolUse (not TokenUsage), got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn token_usage_emitted_when_no_content() {
+        // TokenUsage should be returned when usage is present but content is empty/absent.
+        let line = r#"{"type":"assistant","message":{"role":"assistant","content":[],"usage":{"input_tokens":200,"output_tokens":80}},"uuid":"abc"}"#;
+        let parsed = parse_line("sess-1", line).expect("should parse");
+        match parsed.event {
+            AgentEvent::TokenUsage { input_tokens, output_tokens } => {
+                assert_eq!(input_tokens, 200);
+                assert_eq!(output_tokens, 80);
+            }
+            other => panic!("Expected TokenUsage, got {other:?}"),
         }
     }
 }
