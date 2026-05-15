@@ -19,6 +19,7 @@ import { useEditorKeyboard } from './hooks/useEditorKeyboard.js';
 import { useExtensionMessages } from './hooks/useExtensionMessages.js';
 import { OfficeCanvas } from './office/components/OfficeCanvas.js';
 import { ToolOverlay } from './office/components/ToolOverlay.js';
+import { TokenHealthBar } from './office/components/TokenHealthBar.js';
 import { EditorState } from './office/editor/editorState.js';
 import { EditorToolbar } from './office/editor/EditorToolbar.js';
 import { OfficeState } from './office/engine/officeState.js';
@@ -137,6 +138,38 @@ function App() {
     (window as any).__pixelAgentsRefresh?.();
   }, []);
 
+  // Pet Mode toggle: invoke Tauri command, listen for state-change broadcasts
+  // emitted by the backend (also fires when the pet window is closed via its
+  // own Esc shortcut).
+  const [isPetMode, setIsPetMode] = useState(false);
+  const handleTogglePetMode = useCallback(() => {
+    void (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core');
+        const newState = (await invoke('toggle_pet_mode')) as boolean;
+        setIsPetMode(newState);
+      } catch (e) {
+        console.warn('[App] toggle_pet_mode failed', e);
+      }
+    })();
+  }, []);
+  useEffect(() => {
+    let unlisten: (() => void) | undefined;
+    void (async () => {
+      try {
+        const { listen } = await import('@tauri-apps/api/event');
+        unlisten = await listen<boolean>('pet-mode-changed', (event) => {
+          setIsPetMode(Boolean(event.payload));
+        });
+      } catch {
+        /* not running under Tauri — pet mode silently unavailable */
+      }
+    })();
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, []);
+
   const handleCloseAgent = useCallback((id: number) => {
     vscode.postMessage({ type: 'closeAgent', id });
   }, []);
@@ -247,6 +280,14 @@ function App() {
               );
             })()}
 
+          <TokenHealthBar
+            officeState={officeState}
+            agents={agents}
+            subagentCharacters={subagentCharacters}
+            containerRef={containerRef}
+            zoom={editor.zoom}
+            panRef={editor.panRef}
+          />
           <ToolOverlay
             officeState={officeState}
             agents={agents}
@@ -336,6 +377,8 @@ function App() {
         onToggleSettings={() => setIsSettingsOpen((v) => !v)}
         workspaceFolders={workspaceFolders}
         onRefresh={handleRefresh}
+        isPetMode={isPetMode}
+        onTogglePetMode={handleTogglePetMode}
       />
 
       <NoAgentsOverlay visible={noAgents && layoutReady} />

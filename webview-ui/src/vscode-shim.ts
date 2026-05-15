@@ -64,6 +64,7 @@ async function bootstrap(): Promise<void> {
       externalAssetDirectories?: string[];
       maxSessions?: number;
       hooksEnabled?: boolean;
+      defaultContextWindowMax?: number;
     };
 
     // Load settings first to get maxSessions, then fetch sessions.
@@ -179,6 +180,7 @@ async function bootstrap(): Promise<void> {
       lastSeenVersion: "",
       externalAssetDirectories: [],
       maxSessions: 8,
+      defaultContextWindowMax: 200_000,
     };
     const mergedSettings = persistedSettings
       ? { ...settingsDefaults, ...persistedSettings }

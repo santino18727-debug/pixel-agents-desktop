@@ -152,3 +152,18 @@ export const FUEL_COLOR_CRITICAL = '#ff2222';
 export const FUEL_GAUGE_BG = '#222';
 export const TEAM_LEAD_COLOR = '#ffd700';
 export const TEAM_ROLE_COLOR = '#66aaff';
+
+// ── Token Health Bar (always-visible fuel gauge + threshold bubbles) ────────
+/** Speech bubble lifetime when a token threshold is crossed upward (ms). */
+export const TOKEN_BUBBLE_DURATION_MS = 5000;
+/** Ratio below which the always-on bar fades to discreet alpha. */
+export const TOKEN_HEALTH_BAR_DIM_ALPHA = 0.35;
+export const TOKEN_HEALTH_BAR_FULL_ALPHA = 1.0;
+
+/** Pick the fuel-gauge color for a given token ratio (0..1). */
+export function getFuelColor(ratio: number): string {
+  if (ratio >= TOKEN_CRITICAL_THRESHOLD) return FUEL_COLOR_CRITICAL;
+  if (ratio >= TOKEN_DANGER_THRESHOLD) return FUEL_COLOR_DANGER;
+  if (ratio >= TOKEN_WARN_THRESHOLD) return FUEL_COLOR_WARN;
+  return FUEL_COLOR_OK;
+}

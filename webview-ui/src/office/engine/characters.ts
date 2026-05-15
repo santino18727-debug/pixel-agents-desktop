@@ -91,6 +91,9 @@ export function createCharacter(
     inputTokens: 0,
     outputTokens: 0,
     activeIdleTimer: 0,
+    lastTokenBubbleThreshold: 0,
+    tokenBubbleText: null,
+    tokenBubbleExpiresAt: 0,
   };
 }
 

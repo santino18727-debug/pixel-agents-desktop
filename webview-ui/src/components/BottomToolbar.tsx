@@ -15,6 +15,8 @@ interface BottomToolbarProps {
   onToggleSettings: () => void;
   workspaceFolders: WorkspaceFolder[];
   onRefresh: () => void;
+  isPetMode: boolean;
+  onTogglePetMode: () => void;
 }
 
 export function BottomToolbar({
@@ -25,6 +27,8 @@ export function BottomToolbar({
   onToggleSettings,
   workspaceFolders,
   onRefresh,
+  isPetMode,
+  onTogglePetMode,
 }: BottomToolbarProps) {
   const [isFolderPickerOpen, setIsFolderPickerOpen] = useState(false);
   const [isBypassMenuOpen, setIsBypassMenuOpen] = useState(false);
@@ -141,6 +145,13 @@ export function BottomToolbar({
         title="Settings"
       >
         Settings
+      </Button>
+      <Button
+        variant={isPetMode ? 'active' : 'default'}
+        onClick={onTogglePetMode}
+        title={isPetMode ? 'Exit Pet Mode' : 'Pet Mode — floating mini-agent'}
+      >
+        {isPetMode ? 'Exit Pet Mode' : '🐾 Pet Mode'}
       </Button>
       <Button
         variant="default"

@@ -5,19 +5,8 @@ import { useEffect, useState } from 'react';
 import { Button } from '../../components/ui/Button.js';
 import {
   CHARACTER_SITTING_OFFSET_PX,
-  FUEL_COLOR_CRITICAL,
-  FUEL_COLOR_DANGER,
-  FUEL_COLOR_OK,
-  FUEL_COLOR_WARN,
-  FUEL_GAUGE_BG,
-  FUEL_GAUGE_HEIGHT_PX,
-  FUEL_GAUGE_WIDTH_PX,
-  MAX_CONTEXT_TOKENS,
   TEAM_LEAD_COLOR,
   TEAM_ROLE_COLOR,
-  TOKEN_CRITICAL_THRESHOLD,
-  TOKEN_DANGER_THRESHOLD,
-  TOKEN_WARN_THRESHOLD,
   TOOL_OVERLAY_VERTICAL_OFFSET,
 } from '../../constants.js';
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js';
@@ -58,14 +47,11 @@ function getActivityText(
     }
   }
 
-  return 'Idle';
-}
+  // No tool history (or cleared by turn_duration) but agent is still generating text
+  // between tools or before the first ToolUse. Avoid the misleading "Idle" label.
+  if (isActive) return 'Thinking…';
 
-function getFuelColor(ratio: number): string {
-  if (ratio >= TOKEN_CRITICAL_THRESHOLD) return FUEL_COLOR_CRITICAL;
-  if (ratio >= TOKEN_DANGER_THRESHOLD) return FUEL_COLOR_DANGER;
-  if (ratio >= TOKEN_WARN_THRESHOLD) return FUEL_COLOR_WARN;
-  return FUEL_COLOR_OK;
+  return 'Idle';
 }
 
 export function ToolOverlay({
@@ -155,10 +141,7 @@ export function ToolOverlay({
         }
 
         // Team info
-        const isTeamAgent = !!ch.teamName;
         const teamRoleLabel = ch.isTeamLead ? 'LEAD' : ch.agentName || null;
-        const totalTokens = ch.inputTokens + ch.outputTokens;
-        const tokenRatio = totalTokens / MAX_CONTEXT_TOKENS;
         const hasExtraLines = !!(ch.folderName || teamRoleLabel);
 
         return (
@@ -223,25 +206,6 @@ export function ToolOverlay({
                 </Button>
               )}
             </div>
-            {isTeamAgent && totalTokens > 0 && (
-              <div
-                style={{
-                  width: FUEL_GAUGE_WIDTH_PX,
-                  height: FUEL_GAUGE_HEIGHT_PX,
-                  background: FUEL_GAUGE_BG,
-                  marginTop: 2,
-                }}
-                title={`${Math.round(tokenRatio * 100)}% context used (${(totalTokens / 1000).toFixed(0)}k tokens)`}
-              >
-                <div
-                  style={{
-                    width: `${Math.min(tokenRatio * 100, 100)}%`,
-                    height: '100%',
-                    background: getFuelColor(tokenRatio),
-                  }}
-                />
-              </div>
-            )}
           </div>
         );
       })}

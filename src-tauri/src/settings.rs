@@ -43,6 +43,11 @@ pub struct Settings {
     /// Whether Claude hooks are enabled.
     #[serde(default = "default_hooks_enabled")]
     pub hooks_enabled: bool,
+
+    /// Maximum context window (tokens) used to compute the token health bar ratio.
+    /// Maps to `defaultContextWindowMax` on the frontend. Defaults to 200_000.
+    #[serde(default = "default_context_window_max")]
+    pub default_context_window_max: u32,
 }
 
 impl Default for Settings {
@@ -56,8 +61,13 @@ impl Default for Settings {
             external_asset_directories: Vec::new(),
             max_sessions: default_max_sessions(),
             hooks_enabled: default_hooks_enabled(),
+            default_context_window_max: default_context_window_max(),
         }
     }
+}
+
+fn default_context_window_max() -> u32 {
+    200_000
 }
 
 fn default_watch_all_sessions() -> bool {

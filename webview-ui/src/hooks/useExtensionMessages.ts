@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from 'react';
 
 import { playDoneSound, playPermissionSound, setSoundEnabled } from '../notificationSound.js';
-import type { OfficeState } from '../office/engine/officeState.js';
+import { setContextWindowMax, type OfficeState } from '../office/engine/officeState.js';
 import { setFloorSprites } from '../office/floorTiles.js';
 import { buildDynamicCatalog } from '../office/layout/furnitureCatalog.js';
 import { migrateLayoutColors } from '../office/layout/layoutSerializer.js';
@@ -387,6 +387,7 @@ export function useExtensionMessages(
       if (Array.isArray(msg.externalAssetDirectories)) setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
       if (typeof msg.lastSeenVersion === 'string') setLastSeenVersion(msg.lastSeenVersion as string);
       if (typeof msg.extensionVersion === 'string') setExtensionVersion(msg.extensionVersion as string);
+      if (typeof msg.defaultContextWindowMax === 'number') setContextWindowMax(msg.defaultContextWindowMax as number);
     };
 
     const handleExternalAssetDirectoriesUpdated = (msg: Msg) => {

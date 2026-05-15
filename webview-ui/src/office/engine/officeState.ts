@@ -12,8 +12,21 @@ import {
   HUE_SHIFT_RANGE_DEG,
   INACTIVE_SEAT_TIMER_MIN_SEC,
   INACTIVE_SEAT_TIMER_RANGE_SEC,
+  MAX_CONTEXT_TOKENS,
+  TOKEN_BUBBLE_DURATION_MS,
   WAITING_BUBBLE_DURATION_SEC,
 } from '../../constants.js';
+
+// ── Context window override (Settings.defaultContextWindowMax) ──────────────
+// Module-level so engine code can read it without prop-drilling. Updated via
+// `setContextWindowMax` whenever settings load or change.
+let _contextWindowMax = MAX_CONTEXT_TOKENS;
+export function setContextWindowMax(value: number): void {
+  if (Number.isFinite(value) && value > 0) _contextWindowMax = value;
+}
+export function getContextWindowMax(): number {
+  return _contextWindowMax;
+}
 import { getAnimationFrames, getCatalogEntry, getOnStateType } from '../layout/furnitureCatalog.js';
 import {
   createDefaultLayout,
@@ -722,6 +735,29 @@ export class OfficeState {
     if (!ch) return;
     ch.inputTokens = inputTokens;
     ch.outputTokens = outputTokens;
+
+    // Hysteresis: only trigger bubble on UPWARD threshold crossings to avoid
+    // spam when token counts oscillate near the boundary.
+    const max = getContextWindowMax();
+    const total = inputTokens + outputTokens;
+    const ratio = max > 0 ? total / max : 0;
+    const prev = ch.lastTokenBubbleThreshold;
+    if (ratio >= 0.95 && prev < 0.95) {
+      ch.lastTokenBubbleThreshold = 0.95;
+      ch.tokenBubbleText = '💀 context full';
+      ch.tokenBubbleExpiresAt = Date.now() + TOKEN_BUBBLE_DURATION_MS;
+    } else if (ratio >= 0.8 && prev < 0.8) {
+      ch.lastTokenBubbleThreshold = 0.8;
+      ch.tokenBubbleText = '🥱 /compact please';
+      ch.tokenBubbleExpiresAt = Date.now() + TOKEN_BUBBLE_DURATION_MS;
+    }
+    // Reset hysteresis if the ratio drops well below a threshold (e.g. after
+    // /compact). 5% margin prevents flicker right at the boundary.
+    if (ratio < 0.75 && prev !== 0) {
+      ch.lastTokenBubbleThreshold = 0;
+    } else if (ratio < 0.9 && prev === 0.95) {
+      ch.lastTokenBubbleThreshold = 0.8;
+    }
   }
 
   update(dt: number): void {

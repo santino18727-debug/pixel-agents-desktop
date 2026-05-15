@@ -119,6 +119,17 @@
   }
 }
 
+/* Pet Mode: transparent window — no chrome, no bg. */
+html.pet-mode,
+body.pet-mode,
+html.pet-mode #root,
+body.pet-mode #root {
+  background: transparent !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  overflow: hidden !important;
+}
+
 @keyframes spin {
   from { transform: rotate(0deg); }
   to   { transform: rotate(360deg); }

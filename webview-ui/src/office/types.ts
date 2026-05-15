@@ -33,6 +33,8 @@ export const CharacterState = {
   WALK: 'walk',
   TYPE: 'type',
   BREAK: 'break',
+  /** Visual "context full" state — reuses BREAK frames as a placeholder. */
+  TIRED: 'tired',
 } as const;
 export type CharacterState = (typeof CharacterState)[keyof typeof CharacterState];
 
@@ -201,4 +203,12 @@ export interface Character {
   outputTokens: number;
   /** Seconds spent continuously active without a tool event — auto-idles when threshold exceeded */
   activeIdleTimer: number;
+
+  // -- Token Health Bar --
+  /** Highest token threshold already announced via bubble (hysteresis): 0 | 0.8 | 0.95 */
+  lastTokenBubbleThreshold: 0 | 0.8 | 0.95;
+  /** Text of the currently-displayed token bubble, or null if none. */
+  tokenBubbleText: string | null;
+  /** Epoch ms at which `tokenBubbleText` should be cleared, or 0. */
+  tokenBubbleExpiresAt: number;
 }

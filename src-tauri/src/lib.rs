@@ -4,6 +4,7 @@ pub mod file_watcher;
 pub mod hooks_server;
 pub mod jsonl_parser;
 pub mod layout_persistence;
+pub mod pet_window;
 pub mod session_map;
 pub mod session_registry;
 pub mod settings;
@@ -16,7 +17,7 @@ use settings::{get_settings, set_settings};
 
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
-use tauri::Manager;
+use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_window_state::{AppHandleExt, StateFlags, WindowExt};
 use tracing::error;
 
@@ -59,6 +60,33 @@ fn open_sessions_folder() -> Result<(), String> {
     Ok(())
 }
 
+/// Toggle the pet-mode window. Returns the new state: `true` if open, `false` if closed.
+#[tauri::command]
+fn toggle_pet_mode(app: AppHandle) -> Result<bool, String> {
+    let new_state = if pet_window::is_pet_window_open(&app) {
+        pet_window::close_pet_window(&app)?;
+        false
+    } else {
+        pet_window::create_pet_window(&app)?;
+        true
+    };
+    // Broadcast so the main window's toolbar can sync its label.
+    let _ = app.emit("pet-mode-changed", new_state);
+    Ok(new_state)
+}
+
+/// Bring the main window forward and focus it.
+#[tauri::command]
+fn focus_main_window(app: AppHandle) -> Result<(), String> {
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.unminimize();
+        let _ = win.show();
+        win.set_focus()
+            .map_err(|e| format!("Failed to focus main window: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()
@@ -84,6 +112,8 @@ pub fn run() {
             load_layout,
             asset_loader::scan_external_assets,
             open_sessions_folder,
+            toggle_pet_mode,
+            focus_main_window,
         ])
         .setup(move |app| {
             // Restore saved window size and position (tauri-plugin-window-state).
