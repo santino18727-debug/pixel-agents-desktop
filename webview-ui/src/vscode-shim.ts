@@ -181,19 +181,23 @@ async function bootstrap(): Promise<void> {
       });
 
       // Dispatch existing sub-agents as agentCreated with isTeammate: true.
+      // Skip if backend hasn't resolved agent_id yet — the watcher will emit
+      // agentCreated lazily when the first event arrives. This avoids the
+      // ID collision bug (sub_id = mainSessions.length + i + 1 could clash with
+      // persisted main agent IDs, causing events on wrong characters → "Idle"
+      // label stuck forever).
       const subSessions = sessions.filter((s) => s.is_subagent);
-      subSessions.forEach((sub, subIdx) => {
+      subSessions.forEach((sub) => {
+        if (sub.agent_id == null) return;
         const parentSession = mainSessions.find(
           (m) => m.session_id === sub.parent_session_id,
         );
-        if (!parentSession) return; // parent not found — skip silently
-        const parentId = parentSession.agent_id ?? (mainSessions.indexOf(parentSession) + 1);
-        const subId = sub.agent_id ?? (mainSessions.length + subIdx + 1);
+        if (!parentSession || parentSession.agent_id == null) return;
         dispatch({
           type: "agentCreated",
-          id: subId,
+          id: sub.agent_id,
           isTeammate: true,
-          parentAgentId: parentId,
+          parentAgentId: parentSession.agent_id,
           folderName: sub.folder_name || sub.project_dir.split(/[\/]/).pop() || sub.project_dir,
         });
       });

@@ -97,19 +97,26 @@ pub fn start_watcher(
                 cancel_map.insert(agent_id, Arc::new(AtomicBool::new(false)));
             }
 
-            // Register sub-agents with IDs matching the vscode-shim bootstrap formula:
-            // subId = mainSessions.length + subIdx + 1  (same as vscode-shim.ts line ~144).
-            // This ensures Rust events (agentToolStart, agentStatus…) carry the same ID
-            // as the character the frontend created at startup.
-            let main_count = main_sessions.len();
-            for (sub_idx, sub) in sub_sessions.iter().enumerate() {
-                let sub_id = main_count + sub_idx + 1;
+            // Register sub-agents — HONOR persisted_map first to avoid ID collisions.
+            // Previous bug: assigning sub_id = main_count + sub_idx + 1 ignored persistence
+            // and would collide with existing main agent IDs (1, 2, 3...) causing events
+            // to be dispatched on wrong characters → "Idle" label stuck forever.
+            // Now: same logic as main_sessions, persisted ID wins, otherwise next sequential.
+            for sub in &sub_sessions {
+                let sub_id = if let Some(&existing) = persisted_map.get(&sub.session_id) {
+                    existing
+                } else {
+                    let id = next_sequential;
+                    next_sequential += 1;
+                    id
+                };
                 map.insert(sub.session_id.clone(), sub_id);
                 cache.insert(sub.session_id.clone(), sub.modified_secs);
+                cancel_map.insert(sub_id, Arc::new(AtomicBool::new(false)));
             }
 
             // next_id must be above every assigned ID so new live sessions don't collide.
-            *next_id = next_sequential.max(main_count + sub_sessions.len() + 1);
+            *next_id = next_sequential;
 
             // Persist the updated map so new sessions are stable on next launch.
             session_map::save(&map);
