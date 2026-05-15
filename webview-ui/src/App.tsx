@@ -22,7 +22,7 @@ import { ToolOverlay } from './office/components/ToolOverlay.js';
 import { TokenHealthBar } from './office/components/TokenHealthBar.js';
 import { EditorState } from './office/editor/editorState.js';
 import { EditorToolbar } from './office/editor/EditorToolbar.js';
-import { OfficeState } from './office/engine/officeState.js';
+import { OfficeState, setContextWindowMax } from './office/engine/officeState.js';
 import { isRotatable } from './office/layout/furnitureCatalog.js';
 import { EditTool } from './office/types.js';
 import { isBrowserRuntime } from './runtime.js';
@@ -74,8 +74,12 @@ function App() {
     alwaysShowLabels,
     hooksEnabled,
     setHooksEnabled,
+    notificationsEnabled,
+    setNotificationsEnabled,
     hooksInfoShown,
     noAgents,
+    contextWindowMax,
+    setContextWindowMaxState,
   } = useExtensionMessages(getOfficeState, editor.setLastSavedLayout, isEditDirty);
 
   // Show migration notice once layout reset is detected
@@ -415,6 +419,21 @@ function App() {
           const newVal = !hooksEnabled;
           setHooksEnabled(newVal);
           vscode.postMessage({ type: 'setHooksEnabled', enabled: newVal });
+        }}
+        notificationsEnabled={notificationsEnabled}
+        onToggleNotificationsEnabled={() => {
+          const newVal = !notificationsEnabled;
+          setNotificationsEnabled(newVal);
+          vscode.postMessage({ type: 'setNotificationsEnabled', enabled: newVal });
+        }}
+        contextWindowMax={contextWindowMax}
+        onChangeContextWindowMax={(value) => {
+          setContextWindowMaxState(value);
+          setContextWindowMax(value);
+          vscode.postMessage({
+            type: 'updateSettings',
+            settings: { defaultContextWindowMax: value },
+          });
         }}
       />
 

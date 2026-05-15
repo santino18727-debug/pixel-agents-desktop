@@ -65,6 +65,10 @@ async function bootstrap(): Promise<void> {
       maxSessions?: number;
       hooksEnabled?: boolean;
       defaultContextWindowMax?: number;
+      notificationsEnabled?: boolean;
+      globalHotkey?: string | null;
+      /** Name of the active custom sprite pack (null/undefined = built-in default). */
+      activeSpritePack?: string | null;
     };
 
     // Load settings first to get maxSessions, then fetch sessions.
@@ -104,7 +108,38 @@ async function bootstrap(): Promise<void> {
         settingsEarlyPromise,
       ]);
 
-    dispatch({ type: "characterSpritesLoaded", characters });
+    // Custom sprite pack: if the user selected one in settings, try to load it
+    // from ~/.pixel-agents/sprites/<pack>/. On any failure fall back silently
+    // to the built-in characters.
+    let activeCharacters: unknown = characters;
+    const desiredPack = persistedSettings?.activeSpritePack;
+    if (isTauri && desiredPack) {
+      try {
+        const { invoke } = await import("@tauri-apps/api/core");
+        const pack = await invoke<{
+          info: { name: string; version: string };
+          characters: Array<{ id: string; path: string }>;
+        }>("load_sprite_pack", { name: desiredPack });
+        if (pack && Array.isArray(pack.characters) && pack.characters.length > 0) {
+          // TODO: the built-in characters.json ships decoded pixel arrays, not PNG paths.
+          // Reconstructing those arrays from PNGs is out of scope for the MVP.
+          // For now we keep the built-in `characters` payload so rendering still works,
+          // but emit a marker event so future work can wire in real pack sprites.
+          console.info(
+            `[Tauri shim] Sprite pack "${pack.info.name}" v${pack.info.version} loaded ` +
+              `(${pack.characters.length} PNGs found, full pixel-array support TODO)`,
+          );
+          dispatch({ type: "spritePackLoaded", pack: pack.info, characters: pack.characters });
+        }
+      } catch (e) {
+        console.warn(
+          `[Tauri shim] load_sprite_pack("${desiredPack}") failed; using built-in default:`,
+          e,
+        );
+      }
+    }
+
+    dispatch({ type: "characterSpritesLoaded", characters: activeCharacters });
     dispatch({ type: "floorTilesLoaded", sprites: floors });
     dispatch({ type: "wallTilesLoaded", sets: walls });
 
@@ -181,6 +216,7 @@ async function bootstrap(): Promise<void> {
       externalAssetDirectories: [],
       maxSessions: 8,
       defaultContextWindowMax: 200_000,
+      activeSpritePack: null,
     };
     const mergedSettings = persistedSettings
       ? { ...settingsDefaults, ...persistedSettings }
@@ -251,6 +287,14 @@ async function subscribeTauriEvents(): Promise<void> {
     _unlistenFns.push(await listen<unknown>("layout-changed", (event) =>
       dispatch({ type: "layoutLoaded", layout: event.payload, wasReset: false }),
     ));
+    // Tray "Refresh" item — re-run the bootstrap sequence.
+    _unlistenFns.push(
+      await listen<unknown>("tray-refresh", () => {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const refresh = (window as any).__pixelAgentsRefresh;
+        if (typeof refresh === "function") refresh();
+      }),
+    );
   } catch (e) {
     console.error("[Tauri shim] subscribeTauriEvents failed:", e);
   }
@@ -286,6 +330,11 @@ async function handleOutboundMessage(msg: unknown): Promise<void> {
         break;
       case "setHooksEnabled":
         await invoke("set_settings", { settings: { hooksEnabled: m.enabled } }).catch(() => {});
+        break;
+      case "setNotificationsEnabled":
+        await invoke("set_settings", { settings: { notificationsEnabled: m.enabled } }).catch(
+          () => {},
+        );
         break;
       case "saveLayout":
         // P1: persist layout to ~/.pixel-agents/layout.json via Rust

@@ -67,8 +67,12 @@ interface ExtensionMessageState {
   alwaysShowLabels: boolean;
   hooksEnabled: boolean;
   setHooksEnabled: (v: boolean) => void;
+  notificationsEnabled: boolean;
+  setNotificationsEnabled: (v: boolean) => void;
   hooksInfoShown: boolean;
   noAgents: boolean;
+  contextWindowMax: number;
+  setContextWindowMaxState: (v: number) => void;
 }
 
 function saveAgentSeats(os: OfficeState): void {
@@ -105,8 +109,10 @@ export function useExtensionMessages(
   const [watchAllSessions, setWatchAllSessions] = useState(false);
   const [alwaysShowLabels, setAlwaysShowLabels] = useState(false);
   const [hooksEnabled, setHooksEnabled] = useState(true);
+  const [notificationsEnabled, setNotificationsEnabled] = useState(true);
   const [hooksInfoShown, setHooksInfoShown] = useState(true);
   const [noAgents, setNoAgents] = useState(false);
+  const [contextWindowMax, setContextWindowMaxState] = useState(200_000);
 
   // Track whether initial layout has been loaded (ref to avoid re-render)
   const layoutReadyRef = useRef(false);
@@ -383,11 +389,15 @@ export function useExtensionMessages(
       if (typeof msg.watchAllSessions === 'boolean') setWatchAllSessions(msg.watchAllSessions as boolean);
       if (typeof msg.alwaysShowLabels === 'boolean') setAlwaysShowLabels(msg.alwaysShowLabels as boolean);
       if (typeof msg.hooksEnabled === 'boolean') setHooksEnabled(msg.hooksEnabled as boolean);
+      if (typeof msg.notificationsEnabled === 'boolean') setNotificationsEnabled(msg.notificationsEnabled as boolean);
       if (typeof msg.hooksInfoShown === 'boolean') setHooksInfoShown(msg.hooksInfoShown as boolean);
       if (Array.isArray(msg.externalAssetDirectories)) setExternalAssetDirectories(msg.externalAssetDirectories as string[]);
       if (typeof msg.lastSeenVersion === 'string') setLastSeenVersion(msg.lastSeenVersion as string);
       if (typeof msg.extensionVersion === 'string') setExtensionVersion(msg.extensionVersion as string);
-      if (typeof msg.defaultContextWindowMax === 'number') setContextWindowMax(msg.defaultContextWindowMax as number);
+      if (typeof msg.defaultContextWindowMax === 'number') {
+        setContextWindowMax(msg.defaultContextWindowMax as number);
+        setContextWindowMaxState(msg.defaultContextWindowMax as number);
+      }
     };
 
     const handleExternalAssetDirectoriesUpdated = (msg: Msg) => {
@@ -472,7 +482,11 @@ export function useExtensionMessages(
     alwaysShowLabels,
     hooksEnabled,
     setHooksEnabled,
+    notificationsEnabled,
+    setNotificationsEnabled,
     hooksInfoShown,
     noAgents,
+    contextWindowMax,
+    setContextWindowMaxState,
   };
 }

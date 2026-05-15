@@ -32,6 +32,15 @@ type ModifiedCache = Arc<Mutex<HashMap<String, u64>>>;
 const WAITING_DELAY_MS: u64 = 2000;
 const PERMISSION_DELAY_MS: u64 = 5000;
 
+/// Number of seconds of JSONL history to replay at startup so an agent that
+/// emitted events shortly before the app launched does not appear idle.
+/// Configurable via the `PIXEL_AGENTS_REPLAY_SECS` env var (for debugging).
+const REPLAY_WINDOW_SECS: u64 = 30;
+
+/// Hard ceiling on how far back we will scan inside a single JSONL while
+/// looking for the replay cutoff (safety against gigantic files).
+const REPLAY_MAX_SCAN_BYTES: u64 = 1024 * 1024;
+
 /// Create a new, empty SessionAgentMap.
 /// Called from lib.rs so the map can be shared with hooks_server.
 pub fn new_session_agent_map() -> SessionAgentMap {
@@ -211,11 +220,169 @@ fn seed_offsets(_projects_root: &PathBuf, offsets: &TailOffsets) {
     let Ok(sessions) = scan_projects() else {
         return;
     };
+
+    let replay_window = std::env::var("PIXEL_AGENTS_REPLAY_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(REPLAY_WINDOW_SECS);
+
+    let cutoff = iso8601_cutoff(replay_window);
+
     let mut map = offsets.lock_or_recover();
     for session in sessions {
         let path = PathBuf::from(&session.jsonl_path);
-        if let Ok(meta) = std::fs::metadata(&path) {
-            map.insert(path, meta.len());
+        let Ok(meta) = std::fs::metadata(&path) else {
+            continue;
+        };
+        let len = meta.len();
+        let offset = compute_replay_offset(&path, len, cutoff.as_deref());
+        if offset < len {
+            info!(
+                "Replay: rewound {} bytes in {}",
+                len - offset,
+                path.display()
+            );
+        }
+        map.insert(path, offset);
+    }
+}
+
+/// Build an ISO-8601 UTC cutoff string (`YYYY-MM-DDTHH:MM:SS.sssZ`) for
+/// `now - window_secs`. Returns `None` if the system clock is before the
+/// Unix epoch (shouldn't happen) — caller falls back to legacy seeding.
+fn iso8601_cutoff(window_secs: u64) -> Option<String> {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    let secs = now.as_secs().saturating_sub(window_secs);
+    Some(format_iso8601(secs))
+}
+
+/// Format a Unix timestamp (seconds) as an ISO-8601 UTC string with
+/// millisecond precision and a trailing `Z`. Pure date arithmetic — no
+/// dependency on chrono.
+fn format_iso8601(secs: u64) -> String {
+    // Days since 1970-01-01 + time of day
+    let days = (secs / 86_400) as i64;
+    let tod = secs % 86_400;
+    let hour = tod / 3600;
+    let minute = (tod % 3600) / 60;
+    let second = tod % 60;
+
+    // Convert days-since-epoch to (year, month, day) via Howard Hinnant's algorithm.
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = (z - era * 146_097) as u64; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.000Z",
+        year, m, d, hour, minute, second
+    )
+}
+
+/// Extract the `"timestamp":"…"` field from a single JSONL line, if present.
+/// Returns the raw string value (without surrounding quotes) so callers can
+/// compare it lexicographically against an ISO-8601 cutoff.
+fn extract_timestamp(line: &str) -> Option<&str> {
+    // Tolerate optional whitespace between key, colon, and value.
+    let key_idx = line.find("\"timestamp\"")?;
+    let rest = &line[key_idx + "\"timestamp\"".len()..];
+    let colon = rest.find(':')?;
+    let after_colon = rest[colon + 1..].trim_start();
+    let after_colon = after_colon.strip_prefix('"')?;
+    let end = after_colon.find('"')?;
+    Some(&after_colon[..end])
+}
+
+/// Find the byte offset in `path` of the first line whose timestamp is
+/// >= `cutoff`. Returns `file_len` if no such line exists (i.e. everything
+/// is old, or no parseable timestamp was found) so behaviour matches the
+/// legacy "skip history" path.
+///
+/// Reads the file backwards in 4 KB chunks, capped at `REPLAY_MAX_SCAN_BYTES`.
+fn compute_replay_offset(path: &PathBuf, file_len: u64, cutoff: Option<&str>) -> u64 {
+    if file_len == 0 {
+        return 0;
+    }
+    let Some(cutoff) = cutoff else {
+        return file_len;
+    };
+
+    let scan_limit = file_len.min(REPLAY_MAX_SCAN_BYTES);
+    let scan_start = file_len - scan_limit;
+
+    // For small files, just load the relevant tail in one shot.
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return file_len;
+    };
+    if file.seek(SeekFrom::Start(scan_start)).is_err() {
+        return file_len;
+    }
+    let mut buf = Vec::with_capacity(scan_limit as usize);
+    if file.take(scan_limit).read_to_end(&mut buf).is_err() {
+        return file_len;
+    }
+
+    // If we did not start at byte 0 of the file, the buffer's first "line"
+    // is a partial line — discard it by advancing past the first newline.
+    let line_search_start: usize = if scan_start == 0 {
+        0
+    } else {
+        match buf.iter().position(|&b| b == b'\n') {
+            Some(idx) => idx + 1,
+            None => return file_len, // single megaline, nothing parseable
+        }
+    };
+
+    // Walk forward over complete lines, recording (line_start_offset, has_recent_ts).
+    // The earliest line with timestamp >= cutoff is our replay anchor.
+    let mut found_anchor: Option<u64> = None;
+    let mut sentinel_seen = false; // any parseable timestamp at all
+    let mut cursor = line_search_start;
+    while cursor < buf.len() {
+        let line_start = cursor;
+        let nl_rel = buf[cursor..].iter().position(|&b| b == b'\n');
+        let (line_end, advance) = match nl_rel {
+            Some(rel) => (cursor + rel, cursor + rel + 1),
+            None => (buf.len(), buf.len()), // incomplete trailing line
+        };
+
+        // Stop if we hit an incomplete trailing line (no terminator).
+        if nl_rel.is_none() {
+            break;
+        }
+
+        let line_bytes = &buf[line_start..line_end];
+        if let Ok(line_str) = std::str::from_utf8(line_bytes) {
+            if let Some(ts) = extract_timestamp(line_str) {
+                sentinel_seen = true;
+                if ts >= cutoff {
+                    found_anchor = Some(scan_start + line_start as u64);
+                    break;
+                }
+            }
+        }
+        cursor = advance;
+    }
+
+    match found_anchor {
+        Some(off) => off,
+        None => {
+            // If we never parsed any timestamp at all, the format may be
+            // unfamiliar — degrade by replaying ~50 KB of tail rather than
+            // skipping everything (graceful fallback per spec).
+            if !sentinel_seen {
+                file_len.saturating_sub(50 * 1024).max(0)
+            } else {
+                file_len
+            }
         }
     }
 }
@@ -589,5 +756,117 @@ mod tests {
     #[test]
     fn empty_raw_yields_no_lengths() {
         assert!(count_line_byte_lengths(b"").is_empty());
+    }
+
+    #[test]
+    fn extract_timestamp_basic() {
+        let line = r#"{"type":"x","timestamp":"2026-05-15T10:00:00.000Z","other":1}"#;
+        assert_eq!(
+            extract_timestamp(line),
+            Some("2026-05-15T10:00:00.000Z")
+        );
+    }
+
+    #[test]
+    fn extract_timestamp_missing() {
+        let line = r#"{"type":"x","other":1}"#;
+        assert_eq!(extract_timestamp(line), None);
+    }
+
+    #[test]
+    fn format_iso8601_known_epoch() {
+        assert_eq!(format_iso8601(0), "1970-01-01T00:00:00.000Z");
+        // 2020-01-01T00:00:00Z == 1_577_836_800
+        assert_eq!(format_iso8601(1_577_836_800), "2020-01-01T00:00:00.000Z");
+        // 2020-02-29T00:00:00Z (leap day) == 1_582_934_400
+        assert_eq!(format_iso8601(1_582_934_400), "2020-02-29T00:00:00.000Z");
+    }
+
+    #[test]
+    fn seed_offsets_with_replay_skips_old_lines() {
+        use std::io::Write;
+
+        // Build cutoff as "now - 30s" — same logic as production.
+        let cutoff = iso8601_cutoff(30).expect("cutoff");
+
+        // Helper: a timestamp `delta_secs` in the past, ISO-8601 UTC.
+        let ts_at = |delta_secs: u64| -> String {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_secs();
+            format_iso8601(now.saturating_sub(delta_secs))
+        };
+
+        let old = ts_at(60); // -60s, before cutoff
+        let recent_a = ts_at(10); // -10s, after cutoff
+        let recent_b = ts_at(5); // -5s, after cutoff
+
+        let line_old = format!(r#"{{"type":"a","timestamp":"{}"}}"#, old) + "\n";
+        let line_a = format!(r#"{{"type":"b","timestamp":"{}"}}"#, recent_a) + "\n";
+        let line_b = format!(r#"{{"type":"c","timestamp":"{}"}}"#, recent_b) + "\n";
+
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-agents-replay-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("seed_test.jsonl");
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            f.write_all(line_old.as_bytes()).unwrap();
+            f.write_all(line_a.as_bytes()).unwrap();
+            f.write_all(line_b.as_bytes()).unwrap();
+        }
+        let len = std::fs::metadata(&path).unwrap().len();
+        let offset = compute_replay_offset(&path, len, Some(&cutoff));
+
+        // Expect offset == byte length of the first (old) line — i.e. the
+        // two recent lines will be replayed.
+        let expected = line_old.len() as u64;
+        assert_eq!(
+            offset, expected,
+            "offset should point at start of first recent line"
+        );
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn compute_replay_offset_empty_file_returns_zero() {
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-agents-replay-empty-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("empty.jsonl");
+        std::fs::File::create(&path).unwrap();
+        assert_eq!(compute_replay_offset(&path, 0, Some("2000-01-01T00:00:00.000Z")), 0);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[test]
+    fn compute_replay_offset_all_old_returns_file_len() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!(
+            "pixel-agents-replay-allold-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("all_old.jsonl");
+        let line = "{\"timestamp\":\"2000-01-01T00:00:00.000Z\"}\n";
+        {
+            let mut f = std::fs::File::create(&path).unwrap();
+            for _ in 0..3 {
+                f.write_all(line.as_bytes()).unwrap();
+            }
+        }
+        let len = std::fs::metadata(&path).unwrap().len();
+        let cutoff = iso8601_cutoff(30).unwrap();
+        assert_eq!(compute_replay_offset(&path, len, Some(&cutoff)), len);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 }

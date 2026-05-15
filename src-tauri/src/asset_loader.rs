@@ -1,6 +1,167 @@
+use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use tracing::warn;
+
+/// Metadata describing a discovered sprite pack on disk.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SpritePackInfo {
+    pub name: String,
+    pub version: String,
+    pub author: Option<String>,
+    pub description: Option<String>,
+    pub path: String,
+    pub character_count: usize,
+}
+
+/// Raw manifest as stored on disk (loose schema).
+#[derive(Debug, Deserialize)]
+struct SpritePackManifest {
+    name: Option<String>,
+    version: Option<String>,
+    author: Option<String>,
+    description: Option<String>,
+    #[serde(default)]
+    characters: Vec<Value>,
+}
+
+/// Returns ~/.pixel-agents/sprites/ as a PathBuf, or None if home dir cannot be resolved.
+fn sprite_packs_root() -> Option<PathBuf> {
+    dirs::home_dir().map(|h| h.join(".pixel-agents").join("sprites"))
+}
+
+/// Validates a manifest and returns SpritePackInfo if all required fields are present
+/// and at least one character_N.png exists on disk.
+fn validate_pack(dir: &Path) -> Option<SpritePackInfo> {
+    let manifest_path = dir.join("manifest.json");
+    if !manifest_path.is_file() {
+        return None;
+    }
+    let content = std::fs::read_to_string(&manifest_path).ok()?;
+    let manifest: SpritePackManifest = match serde_json::from_str(&content) {
+        Ok(m) => m,
+        Err(e) => {
+            warn!(
+                "scan_sprite_packs: corrupt manifest {}: {e}",
+                manifest_path.display()
+            );
+            return None;
+        }
+    };
+    let name = manifest.name?.trim().to_owned();
+    if name.is_empty() {
+        return None;
+    }
+    let version = manifest.version?.trim().to_owned();
+    if version.is_empty() {
+        return None;
+    }
+
+    // Count character_N.png files on disk (N=0..63 to be generous).
+    let mut count = 0usize;
+    for n in 0..64 {
+        let p = dir.join(format!("character_{n}.png"));
+        if p.is_file() {
+            count += 1;
+        }
+    }
+    if count == 0 && manifest.characters.is_empty() {
+        warn!(
+            "scan_sprite_packs: pack {} has no character_N.png and empty manifest characters",
+            dir.display()
+        );
+        return None;
+    }
+
+    Some(SpritePackInfo {
+        name,
+        version,
+        author: manifest.author,
+        description: manifest.description,
+        path: dir.to_string_lossy().into_owned(),
+        character_count: count.max(manifest.characters.len()),
+    })
+}
+
+/// Scans ~/.pixel-agents/sprites/ for sprite packs and returns the list of valid ones.
+pub fn scan_sprite_packs() -> Vec<SpritePackInfo> {
+    let Some(root) = sprite_packs_root() else {
+        return Vec::new();
+    };
+    if !root.is_dir() {
+        return Vec::new();
+    }
+    let mut out = Vec::new();
+    match std::fs::read_dir(&root) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    if let Some(info) = validate_pack(&path) {
+                        out.push(info);
+                    }
+                }
+            }
+        }
+        Err(e) => warn!("scan_sprite_packs: cannot read {}: {e}", root.display()),
+    }
+    out
+}
+
+/// Loads a sprite pack by name and returns metadata + list of character PNG paths
+/// the frontend can consume. Returns Err if the pack is missing or invalid.
+///
+/// NOTE: The built-in `characters.json` ships decoded pixel arrays, not PNG paths.
+/// Reconstructing those arrays from arbitrary PNGs is out of scope for this MVP, so
+/// this command surfaces the raw PNG paths for the frontend to handle (or ignore
+/// gracefully with a TODO).
+pub fn load_sprite_pack_impl(name: &str) -> Result<Value, String> {
+    let root = sprite_packs_root().ok_or_else(|| "Cannot resolve home directory".to_owned())?;
+    if !root.is_dir() {
+        return Err(format!("Sprite packs directory not found: {}", root.display()));
+    }
+
+    // Find the pack whose manifest.json declares this name.
+    let entries = std::fs::read_dir(&root).map_err(|e| format!("Cannot read sprite packs: {e}"))?;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        if let Some(info) = validate_pack(&path) {
+            if info.name == name {
+                let mut characters = Vec::new();
+                for n in 0..64 {
+                    let p = path.join(format!("character_{n}.png"));
+                    if p.is_file() {
+                        characters.push(json!({
+                            "id": format!("character_{n}"),
+                            "path": p.to_string_lossy(),
+                        }));
+                    }
+                }
+                return Ok(json!({
+                    "info": info,
+                    "characters": characters,
+                }));
+            }
+        }
+    }
+    Err(format!("Sprite pack not found: {name}"))
+}
+
+/// Tauri command — returns the list of valid sprite packs in ~/.pixel-agents/sprites/.
+#[tauri::command]
+pub fn list_sprite_packs() -> Vec<SpritePackInfo> {
+    scan_sprite_packs()
+}
+
+/// Tauri command — loads a sprite pack by name (returns info + character PNG paths).
+#[tauri::command]
+pub fn load_sprite_pack(name: String) -> Result<Value, String> {
+    load_sprite_pack_impl(&name)
+}
 
 /// Tauri command — scans external asset directories for custom furniture and sprites.
 ///

@@ -48,6 +48,22 @@ pub struct Settings {
     /// Maps to `defaultContextWindowMax` on the frontend. Defaults to 200_000.
     #[serde(default = "default_context_window_max")]
     pub default_context_window_max: u32,
+
+    /// Whether native OS notifications fire on agent waiting / permission events.
+    /// Maps to `notificationsEnabled` on the frontend.
+    #[serde(default = "default_notifications_enabled")]
+    pub notifications_enabled: bool,
+
+    /// Global keyboard shortcut for show/hide of the main window.
+    /// `None` (or empty) disables the shortcut. Default "Ctrl+Shift+P".
+    /// Maps to `globalHotkey` on the frontend.
+    #[serde(default = "default_global_hotkey")]
+    pub global_hotkey: Option<String>,
+
+    /// Name of the active custom sprite pack (from ~/.pixel-agents/sprites/).
+    /// `None` means the built-in default pack is used.
+    #[serde(default)]
+    pub active_sprite_pack: Option<String>,
 }
 
 impl Default for Settings {
@@ -62,8 +78,19 @@ impl Default for Settings {
             max_sessions: default_max_sessions(),
             hooks_enabled: default_hooks_enabled(),
             default_context_window_max: default_context_window_max(),
+            notifications_enabled: default_notifications_enabled(),
+            global_hotkey: default_global_hotkey(),
+            active_sprite_pack: None,
         }
     }
+}
+
+fn default_notifications_enabled() -> bool {
+    true
+}
+
+fn default_global_hotkey() -> Option<String> {
+    Some("Ctrl+Shift+P".to_owned())
 }
 
 fn default_context_window_max() -> u32 {
