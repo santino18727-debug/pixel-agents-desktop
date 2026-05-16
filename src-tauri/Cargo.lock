@@ -2642,6 +2642,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "dirs 5.0.1",
+ "dunce",
  "notify",
  "notify-debouncer-full",
  "serde",

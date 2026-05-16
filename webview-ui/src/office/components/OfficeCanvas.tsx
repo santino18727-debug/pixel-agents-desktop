@@ -73,6 +73,23 @@ export function OfficeCanvas({
   // Zoom scroll accumulator for trackpad pinch sensitivity
   const zoomAccumulatorRef = useRef(0);
 
+  // Refs mirror reactive props so the render callback can read the latest
+  // values WITHOUT re-instantiating the game loop on every change. Tearing
+  // down and restarting the rAF loop on every editorTick / zoom change causes
+  // GC churn (new closures, new ResizeObserver) over long sessions.
+  const isEditModeRef = useRef(isEditMode);
+  const editorStateRef = useRef(editorState);
+  const zoomRef = useRef(zoom);
+  useEffect(() => {
+    isEditModeRef.current = isEditMode;
+  }, [isEditMode]);
+  useEffect(() => {
+    editorStateRef.current = editorState;
+  }, [editorState]);
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
   // Clamp pan so the map edge can't go past a margin inside the viewport
   const clampPan = useCallback(
     (px: number, py: number): { x: number; y: number } => {
@@ -126,6 +143,11 @@ export function OfficeCanvas({
         // Canvas dimensions are in device pixels
         const w = canvas.width;
         const h = canvas.height;
+
+        // Read latest values via refs to keep effect mount-once.
+        const isEditMode = isEditModeRef.current;
+        const editorState = editorStateRef.current;
+        const zoom = zoomRef.current;
 
         // Build editor render state
         let editorRender: EditorRenderState | undefined;
@@ -282,7 +304,11 @@ export function OfficeCanvas({
       stop();
       observer.disconnect();
     };
-  }, [officeState, resizeCanvas, isEditMode, editorState, _editorTick, zoom, panRef]);
+    // Mount-once: reactive values flow through refs (isEditModeRef, editorStateRef,
+    // zoomRef). officeState and panRef are stable across the component lifetime;
+    // _editorTick changes are visible because editorState is mutated in place.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [officeState, resizeCanvas, panRef]);
 
   // Convert CSS mouse coords to world (sprite pixel) coords
   const screenToWorld = useCallback(

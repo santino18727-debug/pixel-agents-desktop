@@ -1,12 +1,26 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use tracing::warn;
+
+/// Maximum manifest size (1 MiB). Anything larger is rejected to avoid OOM.
+const MAX_MANIFEST_BYTES: u64 = 1024 * 1024;
+/// Maximum number of declared characters in a manifest. Matches the on-disk scan bound.
+const MAX_MANIFEST_CHARACTERS: usize = 64;
+/// Maximum number of character_N.png files scanned on disk.
+const MAX_CHARACTERS: usize = 64;
 
 /// Metadata describing a discovered sprite pack on disk.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpritePackInfo {
+    /// Folder name on disk — stable unique identifier used to load the pack.
+    pub folder_name: String,
+    /// Display name from manifest.json (may collide between packs).
+    pub display_name: String,
+    /// Legacy `name` field kept for backward compatibility with the frontend.
+    /// Equals `display_name`. Persist `folder_name` if you need a stable key.
     pub name: String,
     pub version: String,
     pub author: Option<String>,
@@ -42,9 +56,28 @@ fn path_is_within(root: &Path, child: &Path) -> bool {
     }
 }
 
+/// Reads the first 8 bytes of a file and checks the PNG magic signature.
+/// Rejects anything that isn't a real PNG (SVG, HTML, JS, EXE renamed to .png, etc.).
+fn is_valid_png(path: &Path) -> bool {
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let mut header = [0u8; 8];
+    if file.read_exact(&mut header).is_err() {
+        return false;
+    }
+    header == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]
+}
+
 /// Validates a manifest and returns SpritePackInfo if all required fields are present
 /// and at least one character_N.png exists on disk.
-fn validate_pack(dir: &Path) -> Option<SpritePackInfo> {
+///
+/// `folder_name` is the on-disk directory name (already validated against traversal
+/// by the caller via `read_dir`). It becomes the stable unique identifier — pack
+/// loading uses the folder name, not the manifest's `name` field, to defeat
+/// pack-name squatting where two packs declare the same `name`.
+fn validate_pack(dir: &Path, folder_name: &str) -> Option<SpritePackInfo> {
     let manifest_path = dir.join("manifest.json");
     if !manifest_path.is_file() {
         return None;
@@ -58,8 +91,21 @@ fn validate_pack(dir: &Path) -> Option<SpritePackInfo> {
         );
         return None;
     }
+
+    // Cap manifest size before reading — a 10 GiB manifest would OOM the app.
+    let metadata = std::fs::metadata(&manifest_path).ok()?;
+    if metadata.len() > MAX_MANIFEST_BYTES {
+        warn!(
+            "validate_pack: manifest too large ({} bytes, max {}): {}",
+            metadata.len(),
+            MAX_MANIFEST_BYTES,
+            manifest_path.display()
+        );
+        return None;
+    }
+
     let content = std::fs::read_to_string(&manifest_path).ok()?;
-    let manifest: SpritePackManifest = match serde_json::from_str(&content) {
+    let mut manifest: SpritePackManifest = match serde_json::from_str(&content) {
         Ok(m) => m,
         Err(e) => {
             warn!(
@@ -69,8 +115,20 @@ fn validate_pack(dir: &Path) -> Option<SpritePackInfo> {
             return None;
         }
     };
-    let name = manifest.name?.trim().to_owned();
-    if name.is_empty() {
+
+    // Cap declared characters to avoid a manifest claiming 1M virtual characters.
+    if manifest.characters.len() > MAX_MANIFEST_CHARACTERS {
+        warn!(
+            "validate_pack: manifest declares {} characters, truncating to {}: {}",
+            manifest.characters.len(),
+            MAX_MANIFEST_CHARACTERS,
+            manifest_path.display()
+        );
+        manifest.characters.truncate(MAX_MANIFEST_CHARACTERS);
+    }
+
+    let display_name = manifest.name?.trim().to_owned();
+    if display_name.is_empty() {
         return None;
     }
     let version = manifest.version?.trim().to_owned();
@@ -79,20 +137,29 @@ fn validate_pack(dir: &Path) -> Option<SpritePackInfo> {
     }
 
     // Count character_N.png files on disk (N=0..63 to be generous).
-    // Reject any entries that resolve outside the pack dir (symlink traversal).
+    // Reject any entries that resolve outside the pack dir (symlink traversal)
+    // or that are not real PNGs (magic-byte mismatch).
     let mut count = 0usize;
-    for n in 0..64 {
+    for n in 0..MAX_CHARACTERS {
         let p = dir.join(format!("character_{n}.png"));
         if p.is_file() {
-            if path_is_within(dir, &p) {
-                count += 1;
-            } else {
+            if !path_is_within(dir, &p) {
                 warn!(
                     "validate_pack: pack {}: rejected path traversal {:?}",
                     dir.display(),
                     p
                 );
+                continue;
             }
+            if !is_valid_png(&p) {
+                warn!(
+                    "validate_pack: pack {}: rejected non-PNG file {:?}",
+                    dir.display(),
+                    p
+                );
+                continue;
+            }
+            count += 1;
         }
     }
     if count == 0 && manifest.characters.is_empty() {
@@ -104,7 +171,9 @@ fn validate_pack(dir: &Path) -> Option<SpritePackInfo> {
     }
 
     Some(SpritePackInfo {
-        name,
+        folder_name: folder_name.to_owned(),
+        display_name: display_name.clone(),
+        name: display_name,
         version,
         author: manifest.author,
         description: manifest.description,
@@ -127,7 +196,17 @@ pub fn scan_sprite_packs() -> Vec<SpritePackInfo> {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if path.is_dir() {
-                    if let Some(info) = validate_pack(&path) {
+                    let folder_name = match entry.file_name().into_string() {
+                        Ok(s) => s,
+                        Err(_) => {
+                            warn!(
+                                "scan_sprite_packs: skipping non-UTF8 folder name in {}",
+                                root.display()
+                            );
+                            continue;
+                        }
+                    };
+                    if let Some(info) = validate_pack(&path, &folder_name) {
                         out.push(info);
                     }
                 }
@@ -135,57 +214,96 @@ pub fn scan_sprite_packs() -> Vec<SpritePackInfo> {
         }
         Err(e) => warn!("scan_sprite_packs: cannot read {}: {e}", root.display()),
     }
+
+    // Warn on display_name collisions so users can spot pack-name squatting.
+    // We keep all packs (folder_name is the unique key) but log loudly.
+    let mut seen_names = std::collections::HashSet::new();
+    for pack in &out {
+        if !seen_names.insert(pack.display_name.clone()) {
+            warn!(
+                "scan_sprite_packs: display name collision '{}' (folder '{}') — \
+                 packs are uniquely identified by folder name, but the UI may be confusing",
+                pack.display_name, pack.folder_name
+            );
+        }
+    }
+
     out
 }
 
-/// Loads a sprite pack by name and returns metadata + list of character PNG paths
+/// Loads a sprite pack by **folder name** and returns metadata + list of character PNG paths
 /// the frontend can consume. Returns Err if the pack is missing or invalid.
+///
+/// Identity is the on-disk folder name (already validated against traversal) — not the
+/// `name` field from manifest.json — to defeat pack-name squatting where a malicious
+/// pack `aaaa-evil/manifest.json` declares `name: "Cute Cats"` and shadows the real
+/// "Cute Cats" pack purely thanks to filesystem enumeration order.
 ///
 /// NOTE: The built-in `characters.json` ships decoded pixel arrays, not PNG paths.
 /// Reconstructing those arrays from arbitrary PNGs is out of scope for this MVP, so
 /// this command surfaces the raw PNG paths for the frontend to handle (or ignore
 /// gracefully with a TODO).
-pub fn load_sprite_pack_impl(name: &str) -> Result<Value, String> {
+pub fn load_sprite_pack_impl(folder_name: &str) -> Result<Value, String> {
     let root = sprite_packs_root().ok_or_else(|| "Cannot resolve home directory".to_owned())?;
     if !root.is_dir() {
         return Err(format!("Sprite packs directory not found: {}", root.display()));
     }
 
-    // Find the pack whose manifest.json declares this name.
-    let entries = std::fs::read_dir(&root).map_err(|e| format!("Cannot read sprite packs: {e}"))?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        if let Some(info) = validate_pack(&path) {
-            if info.name == name {
-                let mut characters = Vec::new();
-                for n in 0..64 {
-                    let p = path.join(format!("character_{n}.png"));
-                    if p.is_file() {
-                        if !path_is_within(&path, &p) {
-                            warn!(
-                                "load_sprite_pack: pack {}: rejected path traversal {:?}",
-                                path.display(),
-                                p
-                            );
-                            continue;
-                        }
-                        characters.push(json!({
-                            "id": format!("character_{n}"),
-                            "path": p.to_string_lossy(),
-                        }));
-                    }
-                }
-                return Ok(json!({
-                    "info": info,
-                    "characters": characters,
-                }));
+    // Reject path-traversal attempts in the folder name (e.g. "../../etc").
+    // A simple component check is enough: folder_name must be a single, non-empty,
+    // non-traversal segment.
+    if folder_name.is_empty()
+        || folder_name.contains('/')
+        || folder_name.contains('\\')
+        || folder_name == "."
+        || folder_name == ".."
+    {
+        return Err(format!("Invalid sprite pack folder name: {folder_name}"));
+    }
+
+    let path = root.join(folder_name);
+    if !path.is_dir() {
+        return Err(format!("Sprite pack not found: {folder_name}"));
+    }
+    if !path_is_within(&root, &path) {
+        return Err(format!(
+            "Sprite pack rejected (path traversal): {folder_name}"
+        ));
+    }
+
+    let info = validate_pack(&path, folder_name)
+        .ok_or_else(|| format!("Sprite pack invalid: {folder_name}"))?;
+
+    let mut characters = Vec::new();
+    for n in 0..MAX_CHARACTERS {
+        let p = path.join(format!("character_{n}.png"));
+        if p.is_file() {
+            if !path_is_within(&path, &p) {
+                warn!(
+                    "load_sprite_pack: pack {}: rejected path traversal {:?}",
+                    path.display(),
+                    p
+                );
+                continue;
             }
+            if !is_valid_png(&p) {
+                warn!(
+                    "load_sprite_pack: pack {}: rejected non-PNG file {:?}",
+                    path.display(),
+                    p
+                );
+                continue;
+            }
+            characters.push(json!({
+                "id": format!("character_{n}"),
+                "path": p.to_string_lossy(),
+            }));
         }
     }
-    Err(format!("Sprite pack not found: {name}"))
+    Ok(json!({
+        "info": info,
+        "characters": characters,
+    }))
 }
 
 /// Tauri command — returns the list of valid sprite packs in ~/.pixel-agents/sprites/.
@@ -194,10 +312,13 @@ pub fn list_sprite_packs() -> Vec<SpritePackInfo> {
     scan_sprite_packs()
 }
 
-/// Tauri command — loads a sprite pack by name (returns info + character PNG paths).
+/// Tauri command — loads a sprite pack by **folder name** (returns info + character PNG paths).
+///
+/// The frontend should pass the `folderName` from `SpritePackInfo`, NOT the `name` field
+/// (which is a non-unique display string vulnerable to pack-name squatting).
 #[tauri::command]
-pub fn load_sprite_pack(name: String) -> Result<Value, String> {
-    load_sprite_pack_impl(&name)
+pub fn load_sprite_pack(folder_name: String) -> Result<Value, String> {
+    load_sprite_pack_impl(&folder_name)
 }
 
 /// Tauri command — scans external asset directories for custom furniture and sprites.
@@ -236,6 +357,25 @@ pub fn scan_external_assets(dirs: Vec<String>) -> Value {
                                 );
                                 continue;
                             }
+                            // Cap manifest size to avoid OOM from a 10 GiB file.
+                            match std::fs::metadata(&manifest_path) {
+                                Ok(meta) if meta.len() > MAX_MANIFEST_BYTES => {
+                                    warn!(
+                                        "scan_external_assets: manifest too large ({} bytes): {}",
+                                        meta.len(),
+                                        manifest_path.display()
+                                    );
+                                    continue;
+                                }
+                                Ok(_) => {}
+                                Err(e) => {
+                                    warn!(
+                                        "scan_external_assets: cannot stat {}: {e}",
+                                        manifest_path.display()
+                                    );
+                                    continue;
+                                }
+                            }
                             match std::fs::read_to_string(&manifest_path) {
                                 Ok(content) => match serde_json::from_str::<Value>(&content) {
                                     Ok(manifest) => catalog.push(manifest),
@@ -267,6 +407,13 @@ pub fn scan_external_assets(dirs: Vec<String>) -> Value {
                 if !path_is_within(dir, &sprite_path) {
                     warn!(
                         "scan_external_assets: rejected sprite path traversal {:?}",
+                        sprite_path
+                    );
+                    continue;
+                }
+                if !is_valid_png(&sprite_path) {
+                    warn!(
+                        "scan_external_assets: rejected non-PNG sprite {:?}",
                         sprite_path
                     );
                     continue;

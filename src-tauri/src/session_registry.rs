@@ -77,12 +77,33 @@ pub fn scan_projects() -> Result<Vec<SessionMeta>> {
     }
 
     let mut sessions = Vec::new();
+    let mut error_count: usize = 0;
 
-    for entry in WalkDir::new(&projects_root)
+    // Collect entries so we can report aggregate WalkDir failures (ACL denials,
+    // broken symlinks, Windows MAX_PATH overflows). Without this, scan_projects
+    // would silently show "no sessions" with no clue why.
+    let entries: Vec<_> = WalkDir::new(&projects_root)
         .follow_links(false)
         .into_iter()
-        .filter_map(|e| e.ok())
-    {
+        .filter_map(|e| match e {
+            Ok(entry) => Some(entry),
+            Err(err) => {
+                error_count += 1;
+                if error_count <= 5 {
+                    tracing::warn!("scan_projects: WalkDir error: {err}");
+                }
+                None
+            }
+        })
+        .collect();
+
+    if error_count > 0 {
+        tracing::warn!(
+            "scan_projects: {error_count} WalkDir errors during scan (first 5 logged above)"
+        );
+    }
+
+    for entry in entries {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;

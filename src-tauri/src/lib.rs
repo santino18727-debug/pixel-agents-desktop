@@ -296,6 +296,14 @@ pub fn run() {
 
             Ok(())
         })
-        .run(tauri::generate_context!())
-        .expect("error while running Tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building Tauri application")
+        .run(|_app_handle, event| {
+            // Signal background threads (notably the expiry monitor) to stop
+            // before the process is killed. Without this, the 60s sleep loop
+            // can be interrupted mid-`session_map::save`, truncating the file.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                file_watcher::signal_shutdown();
+            }
+        });
 }

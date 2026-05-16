@@ -15,7 +15,19 @@ fn save_lock() -> &'static Mutex<()> {
 }
 
 fn session_map_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".pixel-agents").join(SESSION_MAP_FILE))
+    let home = dirs::home_dir()?;
+    // On Windows, `dirs::home_dir()` can resolve to a OneDrive-redirected
+    // path (e.g. `C:\Users\X\OneDrive`). Cloud sync may race with our atomic
+    // rename and produce phantom `.tmp` files or truncated session-map.json.
+    if home.to_string_lossy().contains("OneDrive") {
+        warn!(
+            "Home directory is inside OneDrive ({}). \
+             session-map.json may conflict with cloud sync. \
+             Consider configuring %USERPROFILE% outside OneDrive.",
+            home.display()
+        );
+    }
+    Some(home.join(".pixel-agents").join(SESSION_MAP_FILE))
 }
 
 /// Loads the persisted session_id → agent_id mapping from disk.

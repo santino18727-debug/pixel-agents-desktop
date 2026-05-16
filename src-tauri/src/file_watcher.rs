@@ -50,6 +50,22 @@ pub fn new_session_agent_map() -> SessionAgentMap {
     Arc::new(Mutex::new(HashMap::new()))
 }
 
+/// Global shutdown flag, checked by background threads (notably the
+/// expiry monitor) so they exit cleanly before the app kills the process.
+/// Without this, the 60s expiry sleep can be interrupted mid-`session_map::save`,
+/// truncating session-map.json.
+static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
+/// Signal background threads to stop. Called from `lib.rs` on
+/// `RunEvent::ExitRequested` (or any other shutdown hook).
+pub fn signal_shutdown() {
+    SHUTDOWN.store(true, Ordering::SeqCst);
+}
+
+fn shutdown_requested() -> bool {
+    SHUTDOWN.load(Ordering::SeqCst)
+}
+
 pub fn start_watcher(
     app: AppHandle,
     registry: SessionRegistry,
@@ -184,9 +200,23 @@ pub fn start_watcher(
         let cancel_expiry = Arc::clone(&timer_cancel_map);
         std::thread::spawn(move || {
             const POLL_INTERVAL: Duration = Duration::from_secs(60);
+            const SHUTDOWN_TICK: Duration = Duration::from_millis(500);
             const MAX_AGE_SECS: u64 = 24 * 3600;
             loop {
-                std::thread::sleep(POLL_INTERVAL);
+                // Sleep in 500ms ticks so we react quickly when the app exits.
+                let mut slept = Duration::from_secs(0);
+                while slept < POLL_INTERVAL {
+                    if shutdown_requested() {
+                        info!("Expiry monitor: shutdown signaled, exiting");
+                        return;
+                    }
+                    std::thread::sleep(SHUTDOWN_TICK);
+                    slept += SHUTDOWN_TICK;
+                }
+                if shutdown_requested() {
+                    info!("Expiry monitor: shutdown signaled, exiting");
+                    return;
+                }
                 let now_secs = std::time::SystemTime::now()
                     .duration_since(std::time::SystemTime::UNIX_EPOCH)
                     .map(|d| d.as_secs())
@@ -272,9 +302,17 @@ fn seed_offsets(_projects_root: &PathBuf, offsets: &TailOffsets) {
 
     let mut map = offsets.lock_or_recover();
     for session in sessions {
-        let path = PathBuf::from(&session.jsonl_path);
-        let Ok(meta) = std::fs::metadata(&path) else {
-            continue;
+        let raw_path = PathBuf::from(&session.jsonl_path);
+        // Fix 4: same canonicalization as process_jsonl_file so the HashMap
+        // keys align (avoids the same session being seeded twice via two
+        // path spellings).
+        let path = dunce::canonicalize(&raw_path).unwrap_or(raw_path);
+        let meta = match std::fs::metadata(&path) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("seed_offsets: metadata failed for {}: {e}", path.display());
+                continue;
+            }
         };
         let len = meta.len();
         let offset = compute_replay_offset(&path, len, cutoff.as_deref());
@@ -361,14 +399,29 @@ fn compute_replay_offset(path: &PathBuf, file_len: u64, cutoff: Option<&str>) ->
     let scan_start = file_len - scan_limit;
 
     // For small files, just load the relevant tail in one shot.
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return file_len;
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!(
+                "compute_replay_offset: File::open failed for {}: {e}",
+                path.display()
+            );
+            return file_len;
+        }
     };
-    if file.seek(SeekFrom::Start(scan_start)).is_err() {
+    if let Err(e) = file.seek(SeekFrom::Start(scan_start)) {
+        warn!(
+            "compute_replay_offset: seek to {scan_start} failed for {}: {e}",
+            path.display()
+        );
         return file_len;
     }
     let mut buf = Vec::with_capacity(scan_limit as usize);
-    if file.take(scan_limit).read_to_end(&mut buf).is_err() {
+    if let Err(e) = file.take(scan_limit).read_to_end(&mut buf) {
+        warn!(
+            "compute_replay_offset: read failed for {}: {e}",
+            path.display()
+        );
         return file_len;
     }
 
@@ -563,8 +616,24 @@ fn process_jsonl_file(
         None => return,
     };
 
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return;
+    // Fix 4: canonicalize the path before using it as a HashMap key so that
+    // junctions / symlinks / mixed casing don't produce duplicate offset
+    // entries (which would double-replay the same bytes). `dunce::canonicalize`
+    // resolves like `std::fs::canonicalize` but strips the Windows `\\?\` UNC
+    // prefix so paths stay comparable to the keys we use elsewhere.
+    let path: PathBuf = dunce::canonicalize(path).unwrap_or_else(|_| path.clone());
+    let path = &path;
+
+    // Windows MAX_PATH (260 chars): paths exceeding this limit fail to open
+    // unless prefixed with `\\?\`. Sessions with deeply nested sub-agents +
+    // UUID directory names can hit this. We log the failure so the issue is
+    // diagnosable instead of silent.
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            warn!("Cannot open {}: {e}", path.display());
+            return;
+        }
     };
 
     let current_len = match file.metadata() {
@@ -593,12 +662,14 @@ fn process_jsonl_file(
 
     let start = *offset_entry;
 
-    if file.seek(SeekFrom::Start(start)).is_err() {
+    if let Err(e) = file.seek(SeekFrom::Start(start)) {
+        warn!("Cannot seek {} to {}: {e}", path.display(), start);
         return;
     }
 
     let mut raw = Vec::new();
-    if file.take(512 * 1024).read_to_end(&mut raw).is_err() {
+    if let Err(e) = file.take(512 * 1024).read_to_end(&mut raw) {
+        warn!("Cannot read {}: {e}", path.display());
         return;
     }
 

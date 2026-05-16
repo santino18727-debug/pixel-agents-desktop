@@ -2,6 +2,12 @@
 // Licensed under MIT
 import type { SpriteData } from '../types.js';
 
+// Cap the number of distinct zoom levels we keep canvases for. Each entry can
+// hold many MB of rasterized sprites; with pinch-zoom this can otherwise grow
+// unbounded over long sessions. We use insertion-order LRU: on every access
+// we delete+re-set the entry so the most-recently-used is always at the end
+// of Map iteration order; evictions target Map.keys().next() (the oldest).
+const MAX_ZOOM_CACHE = 6;
 const zoomCaches = new Map<number, WeakMap<SpriteData, HTMLCanvasElement>>();
 
 // ── Outline sprite generation ─────────────────────────────────
@@ -49,7 +55,19 @@ export function getOutlineSprite(sprite: SpriteData): SpriteData {
 
 export function getCachedSprite(sprite: SpriteData, zoom: number): HTMLCanvasElement {
   let cache = zoomCaches.get(zoom);
-  if (!cache) {
+  if (cache) {
+    // LRU touch: move this zoom level to the "most recently used" end.
+    zoomCaches.delete(zoom);
+    zoomCaches.set(zoom, cache);
+  } else {
+    // Evict oldest entry if we're at cap. Map iteration order = insertion
+    // order, so keys().next() yields the least-recently-used key.
+    if (zoomCaches.size >= MAX_ZOOM_CACHE) {
+      const oldest = zoomCaches.keys().next();
+      if (!oldest.done && oldest.value !== zoom) {
+        zoomCaches.delete(oldest.value);
+      }
+    }
     cache = new WeakMap();
     zoomCaches.set(zoom, cache);
   }

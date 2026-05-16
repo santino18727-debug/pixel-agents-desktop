@@ -2,7 +2,7 @@
 // recently active agent. Renders in a 200x200 always-on-top window.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
-import { getCharacterSprites, setCharacterTemplates } from '../office/sprites/spriteData.js';
+import { getCharacterSprites, hasLoadedCharacters, setCharacterTemplates } from '../office/sprites/spriteData.js';
 import { getCachedSprite } from '../office/sprites/spriteCache.js';
 import { Direction } from '../office/types.js';
 
@@ -49,13 +49,22 @@ export function PetView() {
   // need the full extension-message bootstrap.
   useEffect(() => {
     let cancelled = false;
+    // If another window (e.g. main) already populated the global character
+    // templates, reuse them. Calling setCharacterTemplates again would clobber
+    // the templates and invalidate sprite WeakMap caches keyed on identity.
+    if (hasLoadedCharacters()) {
+      setSpritesReady(true);
+      return () => {
+        cancelled = true;
+      };
+    }
     (async () => {
       try {
         const res = await fetch('/assets/decoded/characters.json');
         if (res.ok) {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const palettes = (await res.json()) as any;
-          if (!cancelled && Array.isArray(palettes) && palettes.length > 0) {
+          if (!cancelled && Array.isArray(palettes) && palettes.length > 0 && !hasLoadedCharacters()) {
             setCharacterTemplates(palettes);
           }
         }
@@ -141,9 +150,22 @@ export function PetView() {
   }, [urlAgentId]);
 
   // Animation tick — alternate frame every 300ms (typing animation).
+  // Uses requestAnimationFrame gated on interval so the loop suspends when the
+  // pet window is occluded / minimized (rAF is paused by the browser), and
+  // we also bail explicitly when document.visibilityState is 'hidden'.
   useEffect(() => {
-    const t = window.setInterval(() => setFrame((f) => (f + 1) % 2), 300);
-    return () => window.clearInterval(t);
+    let rafId = 0;
+    let lastFrame = 0;
+    const INTERVAL_MS = 300;
+    const tick = (now: number) => {
+      if (document.visibilityState !== 'hidden' && now - lastFrame >= INTERVAL_MS) {
+        setFrame((f) => (f + 1) % 2);
+        lastFrame = now;
+      }
+      rafId = requestAnimationFrame(tick);
+    };
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
   }, []);
 
   // Esc closes the pet window (toggles off).

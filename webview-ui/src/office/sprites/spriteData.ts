@@ -49,6 +49,11 @@ export function getLoadedCharacterCount(): number {
   return loadedCharacters ? loadedCharacters.length : PALETTE_COUNT;
 }
 
+/** True iff character templates have actually been loaded (non-empty). */
+export function hasLoadedCharacters(): boolean {
+  return loadedCharacters !== null && loadedCharacters.length > 0;
+}
+
 /** Flip a SpriteData horizontally (for generating left sprites from right) */
 function flipSpriteHorizontal(sprite: SpriteData): SpriteData {
   return sprite.map((row) => [...row].reverse());

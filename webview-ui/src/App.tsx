@@ -157,19 +157,25 @@ function App() {
     })();
   }, []);
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    let unlisten: (() => void) | null = null;
+    let cancelled = false;
     void (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<boolean>('pet-mode-changed', (event) => {
+        const fn = await listen<boolean>('pet-mode-changed', (event) => {
           setIsPetMode(Boolean(event.payload));
         });
+        // Guard against React 18 strict-mode double-mount: if the effect was
+        // already cleaned up before listen() resolved, detach immediately.
+        if (cancelled) fn();
+        else unlisten = fn;
       } catch {
         /* not running under Tauri — pet mode silently unavailable */
       }
     })();
     return () => {
-      if (unlisten) unlisten();
+      cancelled = true;
+      unlisten?.();
     };
   }, []);
 
