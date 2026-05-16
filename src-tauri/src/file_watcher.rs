@@ -19,7 +19,10 @@ use crate::session_registry::{scan_projects, SessionRegistry};
 /// Per-file byte offset for tail-reading.
 type TailOffsets = Arc<Mutex<HashMap<PathBuf, u64>>>;
 
-/// Map from session_id string to frontend agent ID (usize).
+/// Shared, thread-safe mapping from a Claude Code `session_id` (string UUID)
+/// to the corresponding frontend agent ID (`usize`). Used by both the file
+/// watcher and the hooks HTTP server so a session resolves to the same agent
+/// regardless of ingestion path.
 pub type SessionAgentMap = Arc<Mutex<HashMap<String, usize>>>;
 
 /// Map from agent_id to cancellation flag for waiting/permission timers.
@@ -341,7 +344,7 @@ fn extract_timestamp(line: &str) -> Option<&str> {
 }
 
 /// Find the byte offset in `path` of the first line whose timestamp is
-/// >= `cutoff`. Returns `file_len` if no such line exists (i.e. everything
+/// `>= cutoff`. Returns `file_len` if no such line exists (i.e. everything
 /// is old, or no parseable timestamp was found) so behaviour matches the
 /// legacy "skip history" path.
 ///
@@ -418,7 +421,7 @@ fn compute_replay_offset(path: &PathBuf, file_len: u64, cutoff: Option<&str>) ->
             // unfamiliar — degrade by replaying ~50 KB of tail rather than
             // skipping everything (graceful fallback per spec).
             if !sentinel_seen {
-                file_len.saturating_sub(50 * 1024).max(0)
+                file_len.saturating_sub(50 * 1024)
             } else {
                 file_len
             }
@@ -743,8 +746,7 @@ fn process_jsonl_file(
                     .or(path_parent_sid.as_deref());
                 if let Some(parent_sid) = effective_parent {
                     let parent_agent_id = session_to_agent
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
+                        .lock_or_recover()
                         .get(parent_sid)
                         .copied();
                     if let Some(lead_id) = parent_agent_id {

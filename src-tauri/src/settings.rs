@@ -138,7 +138,10 @@ pub fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), S
 
     let mut current: serde_json::Value = store
         .get(SETTINGS_KEY)
-        .unwrap_or_else(|| serde_json::to_value(Settings::default()).unwrap());
+        .unwrap_or_else(|| {
+            serde_json::to_value(Settings::default())
+                .expect("Settings::default must always serialize to JSON")
+        });
 
     if let (Some(obj), Some(patch)) = (current.as_object_mut(), settings.as_object()) {
         for (k, v) in patch {

@@ -5,16 +5,21 @@ use std::time::SystemTime;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
-use crate::error::Result;
+use crate::error::{MutexExt, Result};
 
 /// Metadata for a discovered Claude Code session.
+///
+/// Serialized in camelCase to match the other IPC payloads (`Settings`,
+/// `AssetCatalog`). Field names on the Rust side stay snake_case per
+/// convention; serde renames them at the JSON boundary.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionMeta {
     pub session_id: String,
     pub project_dir: String,
     /// Human-readable project folder name, decoded from Claude Code encoding.
-    /// Claude Code encodes path separators as  in the directory name stored
-    /// under ~/.claude/projects/ (e.g.  -> ).
+    /// Claude Code encodes path separators as `--` in the directory name stored
+    /// under `~/.claude/projects/` (e.g. `C--Dev-foo` -> `Dev-foo`).
     pub folder_name: String,
     pub is_subagent: bool,
     /// For sub-agent sessions, the session_id of the parent (derived from path).
@@ -37,13 +42,13 @@ pub fn new_registry() -> SessionRegistry {
 
 /// Decode a Claude Code project directory name to a human-readable folder name.
 ///
-/// Claude Code stores sessions under ~/.claude/projects/<encoded-path>/ where
-/// the path separators (/ and \) are replaced by . For example:
-///     ->  
-///     ->  
+/// Claude Code stores sessions under `~/.claude/projects/<encoded-path>/` where
+/// path separators are replaced by `--`. For example:
+///     `C--Dev-foo`        -> `Dev-foo`
+///     `C--Dev--proj--app` -> `app`
 ///
-/// Strategy: split on  (the separator), take the last non-empty segment.
-/// Trade-off: folder names that legitimately contain  will be truncated.
+/// Strategy: split on `--` (the separator), take the last non-empty segment.
+/// Trade-off: folder names that legitimately contain `--` will be truncated.
 pub fn decode_folder_name(encoded: &str) -> String {
     // Split on the double-dash separator used by Claude Code for path components
     let parts: Vec<&str> = encoded.split("--").collect();
@@ -56,9 +61,9 @@ pub fn decode_folder_name(encoded: &str) -> String {
         .to_owned()
 }
 
-/// Walk  and collect all  session files.
+/// Walk `~/.claude/projects/` and collect all `.jsonl` session files.
 ///
-/// Sub-agent sessions live under .
+/// Sub-agent sessions live under `<project>/<parent_uuid>/subagents/`.
 /// Returns an error only if the home directory cannot be resolved.
 pub fn scan_projects() -> Result<Vec<SessionMeta>> {
     let home = dirs::home_dir().ok_or_else(|| {
@@ -91,7 +96,7 @@ pub fn scan_projects() -> Result<Vec<SessionMeta>> {
     }
 
     // Sort by most recently modified first
-    sessions.sort_by(|a, b| b.modified_secs.cmp(&a.modified_secs));
+    sessions.sort_by_key(|s| std::cmp::Reverse(s.modified_secs));
 
     Ok(sessions)
 }
@@ -99,8 +104,8 @@ pub fn scan_projects() -> Result<Vec<SessionMeta>> {
 fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> Option<SessionMeta> {
     let session_id = jsonl_path.file_stem()?.to_str()?.to_owned();
 
-    // Determine if this is a sub-agent by checking whether  appears
-    // in the path components between the projects root and the file.
+    // Determine if this is a sub-agent by checking whether "subagents"
+    // appears in the path components between the projects root and the file.
     let rel = jsonl_path.strip_prefix(projects_root).ok()?;
     let components: Vec<&str> = rel
         .components()
@@ -153,8 +158,8 @@ fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> 
     })
 }
 
-/// Tauri command -- returns sessions modified within the last  hours.
-/// Defaults to 24h. Returns at most  sessions (default 20).
+/// Tauri command — returns sessions modified within the last `max_age_hours` hours.
+/// Defaults to 24h. Returns at most `limit` sessions (default 20).
 /// Populates agent_id from the shared session-agent map so the frontend
 /// uses the same IDs as the file watcher (avoids idle-forever mismatch).
 #[tauri::command]
@@ -175,11 +180,10 @@ pub fn list_sessions(
         .map(|d| d.as_secs().saturating_sub(max_age * 3600))
         .unwrap_or(0);
 
-    let map = agent_map.lock().unwrap_or_else(|e| e.into_inner());
+    let map = agent_map.lock_or_recover();
 
     registry
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
+        .lock_or_recover()
         .iter()
         .filter(|s| s.modified_secs >= cutoff)
         .take(limit)

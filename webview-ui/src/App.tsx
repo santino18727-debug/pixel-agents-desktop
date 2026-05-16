@@ -138,8 +138,7 @@ function App() {
   );
 
   const handleRefresh = useCallback(() => {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (window as any).__pixelAgentsRefresh?.();
+    window.__pixelAgentsRefresh?.();
   }, []);
 
   // Pet Mode toggle: invoke Tauri command, listen for state-change broadcasts

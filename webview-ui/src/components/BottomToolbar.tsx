@@ -48,6 +48,19 @@ export function BottomToolbar({
     return () => document.removeEventListener('mousedown', handleClick);
   }, [isFolderPickerOpen, isBypassMenuOpen]);
 
+  // Escape key closes any open dropdown — keyboard a11y.
+  useEffect(() => {
+    if (!isFolderPickerOpen && !isBypassMenuOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setIsFolderPickerOpen(false);
+        setIsBypassMenuOpen(false);
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [isFolderPickerOpen, isBypassMenuOpen]);
+
   const hasMultipleFolders = workspaceFolders.length > 1;
 
   const handleAgentClick = () => {
@@ -107,6 +120,8 @@ export function BottomToolbar({
         <Button
           variant="accent"
           onClick={handleAgentClick}
+          aria-haspopup="menu"
+          aria-expanded={isFolderPickerOpen || isBypassMenuOpen}
           className={
             isFolderPickerOpen || isBypassMenuOpen
               ? 'bg-accent-bright'
@@ -115,12 +130,12 @@ export function BottomToolbar({
         >
           + Agent
         </Button>
-        <Dropdown isOpen={isBypassMenuOpen}>
+        <Dropdown isOpen={isBypassMenuOpen} ariaLabel="Agent options">
           <DropdownItem onClick={() => handleBypassSelect(true)}>
             Skip permissions mode <span className="text-2xs text-warning">⚠</span>
           </DropdownItem>
         </Dropdown>
-        <Dropdown isOpen={isFolderPickerOpen} className="min-w-128">
+        <Dropdown isOpen={isFolderPickerOpen} className="min-w-128" ariaLabel="Select workspace folder">
           {workspaceFolders.map((folder) => (
             <DropdownItem
               key={folder.path}

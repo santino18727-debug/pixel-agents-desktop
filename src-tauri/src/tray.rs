@@ -39,7 +39,7 @@ pub fn build_tray(
     app: &AppHandle,
     active: ActiveAgents,
     shared: SharedTrayState,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> tauri::Result<()> {
     let count_item = MenuItem::with_id(app, "count", "0 agents actifs", false, None::<&str>)?;
     let sep1 = tauri::menu::PredefinedMenuItem::separator(app)?;
     let pet_item = MenuItem::with_id(app, "pet", "Open Pet Mode", true, None::<&str>)?;
@@ -68,7 +68,11 @@ pub fn build_tray(
     });
 
     TrayIconBuilder::new()
-        .icon(app.default_window_icon().unwrap().clone())
+        .icon(
+            app.default_window_icon()
+                .expect("default window icon must be embedded at build time")
+                .clone(),
+        )
         .menu(&tray_menu)
         .tooltip("Pixel Agents Desktop")
         .on_menu_event(|app, event| match event.id.as_ref() {

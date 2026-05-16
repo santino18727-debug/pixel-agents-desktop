@@ -6,14 +6,19 @@ interface DropdownProps {
   isOpen: boolean;
   children: ReactNode;
   className?: string;
+  ariaLabel?: string;
 }
 
-export function Dropdown({ isOpen, children, className = '' }: DropdownProps) {
+export function Dropdown({ isOpen, children, className = '', ariaLabel }: DropdownProps) {
   if (!isOpen) return null;
 
   return (
     <div className="absolute bottom-full left-0 pb-10 z-10">
-      <div className={`bg-bg border-2 border-border rounded-none shadow-pixel p-4 ${className}`}>
+      <div
+        role="menu"
+        aria-label={ariaLabel}
+        className={`bg-bg border-2 border-border rounded-none shadow-pixel p-4 ${className}`}
+      >
         {children}
       </div>
     </div>
@@ -29,6 +34,8 @@ interface DropdownItemProps {
 export function DropdownItem({ onClick, children, className = '' }: DropdownItemProps) {
   return (
     <button
+      type="button"
+      role="menuitem"
       onClick={onClick}
       className={`block w-full text-left py-2 px-12 bg-transparent border-none rounded-none cursor-pointer whitespace-nowrap hover:bg-btn-bg ${className}`}
     >

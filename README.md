@@ -2,27 +2,54 @@
 
 Standalone desktop viewer for [Claude Code](https://claude.ai/code) sessions — built on top of [pablodelucca/pixel-agents](https://github.com/pablodelucca/pixel-agents).
 
-Watch your Claude Code agents animate as pixel-art characters in a virtual office, without needing VS Code.
+Watch your Claude Code agents animate as pixel-art characters in a virtual office, without needing VS Code. It's a hobby tool, not a SaaS — have fun with it.
 
-## Status
+## Features
 
-Phase 0 (scaffold) — window opens, Rust backend compiles, file watcher ready.
+- **Pixel-art office** with animated characters, one per active Claude Code agent
+- **Pet Mode** — a tiny always-on-top mini-window with a single agent, perfect for the corner of your screen
+- **Token Health Bar** above each character, showing context-window usage with hysteresis-smoothed bubbles
+- **Native OS notifications** when an agent needs your attention
+- **System tray** with a live agent count and a Pet Mode toggle
+- **Global hotkey** `Ctrl+Shift+P` to show/hide the main window
+- **Custom sprite packs** — drop a folder into `~/.pixel-agents/sprites/` and pick it from settings
+- **Persistent layout & settings** — window position, character placement, and preferences survive restarts
+- **JSONL replay** at startup (30s lookback) so re-opening the app shows recent activity
+- **Claude Code Hooks integration** — optional local HTTP endpoint that lets Claude Code push tool-use events directly to the app
 
 ## Requirements
 
-- Windows 10/11 with WebView2 (pre-installed on Windows 11)
-- Claude Code sessions at `%USERPROFILE%\.claude\projects\`
+- **Windows 10/11** with WebView2 (the installer bootstraps WebView2 automatically; pre-installed on Windows 11)
+- **macOS 10.15+** (Catalina or later)
+- **Linux x64** with `webkit2gtk` (most modern distros)
+- Claude Code sessions at `~/.claude/projects/` (default location)
 
 ## Install
 
-Download the latest `.msi` from [Releases](https://github.com/santino18727-debug/pixel-agents-desktop/releases) and run it.
+Download the latest installer from [Releases](https://github.com/santino18727-debug/pixel-agents-desktop/releases) and run it:
+
+- Windows: `.msi`
+- macOS: `.dmg`
+- Linux: `.AppImage` or `.deb`
+
+## Logs
+
+Set `RUST_LOG=debug` before launching to get verbose logs from the Rust backend (file watcher, hooks server, settings store). Useful when reporting an issue.
+
+```sh
+# Windows PowerShell
+$env:RUST_LOG="debug"; .\pixel-agents-desktop.exe
+
+# macOS / Linux
+RUST_LOG=debug ./pixel-agents-desktop
+```
 
 ## Development
 
 ### Prerequisites
 
 ```
-winget install Rustlang.Rustup
+winget install Rustlang.Rustup   # or rustup.rs on macOS/Linux
 node >= 22
 ```
 
@@ -41,7 +68,7 @@ npm run dev
 
 ```sh
 npm run build
-# MSI output: src-tauri/target/release/bundle/msi/
+# Bundle output: src-tauri/target/release/bundle/
 ```
 
 ### Tests
@@ -59,11 +86,12 @@ cargo clippy -- -D warnings
 ```
 src-tauri/src/
   main.rs              — entry point
-  lib.rs               — Tauri app setup, command registration
+  lib.rs               — Tauri app setup, command registration, tray, hotkeys
   error.rs             — AppError enum
   jsonl_parser.rs      — JSONL line parser, AgentEvent enum
   session_registry.rs  — Session discovery via walkdir
   file_watcher.rs      — notify-debouncer-full filesystem watcher
+  hooks_server.rs      — Local HTTP server for Claude Code Hooks API
   settings.rs          — Persisted settings via tauri-plugin-store
 
 webview-ui/            — React 19 + TypeScript + Vite (from upstream)
@@ -72,21 +100,20 @@ webview-ui/            — React 19 + TypeScript + Vite (from upstream)
 shared/                — Shared assets/utilities (from upstream)
 ```
 
-## Relation to upstream
-
-This is a contribution toward [pablodelucca/pixel-agents](https://github.com/pablodelucca/pixel-agents).
-`webview-ui/` and `shared/` are copied from upstream with minimal modifications (only `vscode-shim.ts` added and `main.tsx` updated with one import line).
-
-## License
-
-MIT — see upstream for original copyright.
-
 ## Dependencies & API Usage
 
-Pixel Agents Desktop is a viewer for Claude Code sessions — it reads local session files written to `~/.claude/projects/` by the Claude Code CLI, but does not interact with the Anthropic API or require authentication. Built with Tauri v2, it parses Claude Code's internal JSONL session format to visualize agent activity in real-time. It is not affiliated with Anthropic and does not depend on the Anthropic SDK. All session data originates from local Claude Code runs; this app does not make API calls or send data to Anthropic's servers.
+Pixel Agents Desktop is a viewer for Claude Code sessions — it reads local session files written to `~/.claude/projects/` by the Claude Code CLI. It does **not** interact with the Anthropic API and does **not** require authentication. Built with Tauri v2, it parses Claude Code's internal JSONL session format to visualize agent activity in real-time. It is not affiliated with Anthropic and does not depend on the Anthropic SDK. All session data originates from local Claude Code runs; this app does not make API calls or send data to Anthropic's servers.
 
 ## Credits
 
-This project is a Tauri v2 desktop fork of [pixel-agents](https://github.com/pablodelucca/pixel-agents) by Pablo De Lucca.
-The `webview-ui/` and `shared/` directories are derived from that work, used here under the terms of the MIT License.
-Original source: https://github.com/pablodelucca/pixel-agents
+This project is a Tauri v2 desktop fork of [pixel-agents](https://github.com/pablodelucca/pixel-agents) by **Pablo de Lucca**. The `webview-ui/` and `shared/` directories are derived from that work, used here under the terms of the MIT License.
+
+- Original source: https://github.com/pablodelucca/pixel-agents
+- Original author: Pablo de Lucca
+- See [`LICENSE-UPSTREAM`](./LICENSE-UPSTREAM) for the upstream MIT license text.
+
+Huge thanks to Pablo for the pixel-art aesthetic and the upstream React app that makes this thing fun.
+
+## License
+
+MIT — see [`LICENSE`](./LICENSE). Upstream license preserved in [`LICENSE-UPSTREAM`](./LICENSE-UPSTREAM).

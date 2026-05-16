@@ -12,15 +12,12 @@ function dispatch(data: unknown): void {
   window.dispatchEvent(new MessageEvent("message", { data }));
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(window as any).acquireVsCodeApi = () => ({
+window.acquireVsCodeApi = () => ({
   postMessage: handleOutboundMessage,
 });
 
 const isTauri =
-  typeof window !== "undefined" &&
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  typeof (window as any).__TAURI_INTERNALS__ !== "undefined";
+  typeof window !== "undefined" && typeof window.__TAURI_INTERNALS__ !== "undefined";
 
 let bootstrapScheduled = false;
 function scheduleBootstrap(): void {
@@ -35,23 +32,22 @@ if (document.readyState !== "loading") {
 }
 
 // Exposed so the UI refresh button can re-run the full bootstrap sequence.
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-(window as any).__pixelAgentsRefresh = () => void bootstrap();
+window.__pixelAgentsRefresh = () => void bootstrap();
 
 async function bootstrap(): Promise<void> {
   try {
     type SessionRecord = {
-      session_id: string;
-      project_dir: string;
+      sessionId: string;
+      projectDir: string;
       /** Human-readable project name, decoded from Claude Code path encoding. */
-      folder_name: string;
-      is_subagent: boolean;
-      /** For sub-agent sessions, the session_id of the parent (derived from path). */
-      parent_session_id: string | null;
-      jsonl_path: string;
-      modified_secs: number;
+      folderName: string;
+      isSubagent: boolean;
+      /** For sub-agent sessions, the sessionId of the parent (derived from path). */
+      parentSessionId: string | null;
+      jsonlPath: string;
+      modifiedSecs: number;
       /** Resolved agent ID from the persisted session map. Null if session is new. */
-      agent_id: number | null;
+      agentId: number | null;
     };
 
     type PersistedSettings = {
@@ -149,15 +145,15 @@ async function bootstrap(): Promise<void> {
       sprites: furniture,
     });
 
-    const mainSessions = sessions.filter((s) => !s.is_subagent);
+    const mainSessions = sessions.filter((s) => !s.isSubagent);
     if (mainSessions.length > 0) {
-      // Use backend-resolved agent_id so IDs match what the file watcher emits.
+      // Use backend-resolved agentId so IDs match what the file watcher emits.
       // Fall back to sequential if the session is brand-new (not yet in persisted map).
-      const agentIds = mainSessions.map((s, i) => s.agent_id ?? (i + 1));
+      const agentIds = mainSessions.map((s, i) => s.agentId ?? (i + 1));
       const folderNames: Record<number, string> = {};
       mainSessions.forEach((s, i) => {
-        const agentId = s.agent_id ?? (i + 1);
-        folderNames[agentId] = s.folder_name || s.project_dir.split(/[\/]/).pop() || s.project_dir;
+        const agentId = s.agentId ?? (i + 1);
+        folderNames[agentId] = s.folderName || s.projectDir.split(/[\/]/).pop() || s.projectDir;
       });
       dispatch({
         type: "existingAgents",
@@ -169,36 +165,36 @@ async function bootstrap(): Promise<void> {
       // Always start existing sessions as idle at boot — the file watcher will quickly
       // re-activate characters if Claude Code is actively running tools.
       mainSessions.forEach((s, i) => {
-        dispatch({ type: "agentStatus", id: s.agent_id ?? (i + 1), status: "idle" });
+        dispatch({ type: "agentStatus", id: s.agentId ?? (i + 1), status: "idle" });
       });
       // P2: dispatch workspaceFolders so the frontend can display folder names per agent.
       dispatch({
         type: "workspaceFolders",
         folders: mainSessions.map((s) => ({
-          name: s.folder_name || s.project_dir.split(/[\/]/).pop() || s.project_dir,
-          path: s.project_dir,
+          name: s.folderName || s.projectDir.split(/[\/]/).pop() || s.projectDir,
+          path: s.projectDir,
         })),
       });
 
       // Dispatch existing sub-agents as agentCreated with isTeammate: true.
-      // Skip if backend hasn't resolved agent_id yet — the watcher will emit
+      // Skip if backend hasn't resolved agentId yet — the watcher will emit
       // agentCreated lazily when the first event arrives. This avoids the
       // ID collision bug (sub_id = mainSessions.length + i + 1 could clash with
       // persisted main agent IDs, causing events on wrong characters → "Idle"
       // label stuck forever).
-      const subSessions = sessions.filter((s) => s.is_subagent);
+      const subSessions = sessions.filter((s) => s.isSubagent);
       subSessions.forEach((sub) => {
-        if (sub.agent_id == null) return;
+        if (sub.agentId == null) return;
         const parentSession = mainSessions.find(
-          (m) => m.session_id === sub.parent_session_id,
+          (m) => m.sessionId === sub.parentSessionId,
         );
-        if (!parentSession || parentSession.agent_id == null) return;
+        if (!parentSession || parentSession.agentId == null) return;
         dispatch({
           type: "agentCreated",
-          id: sub.agent_id,
+          id: sub.agentId,
           isTeammate: true,
-          parentAgentId: parentSession.agent_id,
-          folderName: sub.folder_name || sub.project_dir.split(/[\/]/).pop() || sub.project_dir,
+          parentAgentId: parentSession.agentId,
+          folderName: sub.folderName || sub.projectDir.split(/[\/]/).pop() || sub.projectDir,
         });
       });
     } else {
@@ -294,8 +290,7 @@ async function subscribeTauriEvents(): Promise<void> {
     // Tray "Refresh" item — re-run the bootstrap sequence.
     _unlistenFns.push(
       await listen<unknown>("tray-refresh", () => {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const refresh = (window as any).__pixelAgentsRefresh;
+        const refresh = window.__pixelAgentsRefresh;
         if (typeof refresh === "function") refresh();
       }),
     );

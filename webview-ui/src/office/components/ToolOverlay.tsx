@@ -1,7 +1,5 @@
 // Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
 // Licensed under MIT
-import { useEffect, useRef, useState } from 'react';
-
 import { Button } from '../../components/ui/Button.js';
 import {
   CHARACTER_SITTING_OFFSET_PX,
@@ -13,6 +11,7 @@ import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js';
 import type { OfficeState } from '../engine/officeState.js';
 import type { ToolActivity } from '../types.js';
 import { CharacterState, TILE_SIZE } from '../types.js';
+import { useOverlayPositioning } from '../utils/overlayPositioning.js';
 
 interface ToolOverlayProps {
   officeState: OfficeState;
@@ -65,56 +64,39 @@ export function ToolOverlay({
   onCloseAgent,
   alwaysShowOverlay,
 }: ToolOverlayProps) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    let rafId = 0;
-    let lastTick = 0;
-    // Throttle re-renders to ~15 fps; overlays are static labels that just
-    // track sprite positions — the canvas sprites animate on their own rAF.
-    const TICK_INTERVAL_MS = 66;
-    const tick = (now: number) => {
-      if (now - lastTick >= TICK_INTERVAL_MS) {
-        setTick((n) => n + 1);
-        lastTick = now;
-      }
-      rafId = requestAnimationFrame(tick);
-    };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, []);
-
-  // Cache container rect; invalidate via ResizeObserver + scroll, so we
-  // don't force a synchronous reflow on every tick.
-  const rectRef = useRef<DOMRect | null>(null);
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const update = () => {
-      rectRef.current = el.getBoundingClientRect();
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    window.addEventListener('scroll', update, true);
-    window.addEventListener('resize', update);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('scroll', update, true);
-      window.removeEventListener('resize', update);
-    };
-  }, [containerRef]);
+  // Shared rAF tick + cached-rect positioning helper.
+  const { getRect, getDeviceOffsets } = useOverlayPositioning(containerRef);
 
   const el = containerRef.current;
   if (!el) return null;
-  const rect = rectRef.current ?? el.getBoundingClientRect();
+  // Fall back to a live getBoundingClientRect on first paint before the
+  // ResizeObserver has populated the cache; subsequent ticks use the cache.
+  const rect = getRect() ?? el.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const canvasW = Math.round(rect.width * dpr);
-  const canvasH = Math.round(rect.height * dpr);
   const layout = officeState.getLayout();
-  const mapW = layout.cols * TILE_SIZE * zoom;
-  const mapH = layout.rows * TILE_SIZE * zoom;
-  const deviceOffsetX = Math.floor((canvasW - mapW) / 2) + Math.round(panRef.current.x);
-  const deviceOffsetY = Math.floor((canvasH - mapH) / 2) + Math.round(panRef.current.y);
+  // Mirror the cached-rect branch when falling back to the live rect.
+  let canvasW: number;
+  let canvasH: number;
+  let deviceOffsetX: number;
+  let deviceOffsetY: number;
+  if (getRect()) {
+    const off = getDeviceOffsets(dpr, zoom, layout, panRef.current.x, panRef.current.y, TILE_SIZE);
+    canvasW = off.canvasW;
+    canvasH = off.canvasH;
+    deviceOffsetX = off.deviceOffsetX;
+    deviceOffsetY = off.deviceOffsetY;
+  } else {
+    canvasW = Math.round(rect.width * dpr);
+    canvasH = Math.round(rect.height * dpr);
+    const mapW = layout.cols * TILE_SIZE * zoom;
+    const mapH = layout.rows * TILE_SIZE * zoom;
+    deviceOffsetX = Math.floor((canvasW - mapW) / 2) + Math.round(panRef.current.x);
+    deviceOffsetY = Math.floor((canvasH - mapH) / 2) + Math.round(panRef.current.y);
+  }
+  // Silence noUnusedLocals — canvasW/H are kept for parity with the original
+  // computation (future overlays may need bounds clamping).
+  void canvasW;
+  void canvasH;
 
   const selectedId = officeState.selectedAgentId;
   const hoveredId = officeState.hoveredAgentId;

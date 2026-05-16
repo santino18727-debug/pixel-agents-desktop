@@ -73,7 +73,12 @@ fn parse_shortcut(raw: &str) -> Option<Shortcut> {
 fn parse_key(s: &str) -> Option<Code> {
     // Letters
     if s.len() == 1 {
-        let ch = s.chars().next().unwrap().to_ascii_uppercase();
+        // SAFETY: len == 1 guarantees at least one char is present.
+        let ch = s
+            .chars()
+            .next()
+            .expect("single-byte string must contain one char")
+            .to_ascii_uppercase();
         return match ch {
             'A' => Some(Code::KeyA),
             'B' => Some(Code::KeyB),

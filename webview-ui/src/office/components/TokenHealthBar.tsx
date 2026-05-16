@@ -1,7 +1,5 @@
 // Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
 // Licensed under MIT
-import { useEffect, useRef, useState } from 'react';
-
 import {
   CHARACTER_SITTING_OFFSET_PX,
   FUEL_GAUGE_BG,
@@ -17,6 +15,7 @@ import {
 import type { SubagentCharacter } from '../../hooks/useExtensionMessages.js';
 import { getContextWindowMax, type OfficeState } from '../engine/officeState.js';
 import { CharacterState, TILE_SIZE } from '../types.js';
+import { useOverlayPositioning } from '../utils/overlayPositioning.js';
 
 interface TokenHealthBarProps {
   officeState: OfficeState;
@@ -45,55 +44,29 @@ export function TokenHealthBar({
   zoom,
   panRef,
 }: TokenHealthBarProps) {
-  const [, setTick] = useState(0);
-  useEffect(() => {
-    let rafId = 0;
-    let lastTick = 0;
-    // Throttle to ~15 fps — bar position is just following sprites, no
-    // visual animation depends on a 60 fps re-render.
-    const TICK_INTERVAL_MS = 66;
-    const tick = (now: number) => {
-      if (now - lastTick >= TICK_INTERVAL_MS) {
-        setTick((n) => n + 1);
-        lastTick = now;
-      }
-      rafId = requestAnimationFrame(tick);
-    };
-    rafId = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(rafId);
-  }, []);
-
-  // Cache container rect; invalidate via ResizeObserver + scroll/resize.
-  const rectRef = useRef<DOMRect | null>(null);
-  useEffect(() => {
-    const el = containerRef.current;
-    if (!el) return;
-    const update = () => {
-      rectRef.current = el.getBoundingClientRect();
-    };
-    update();
-    const ro = new ResizeObserver(update);
-    ro.observe(el);
-    window.addEventListener('scroll', update, true);
-    window.addEventListener('resize', update);
-    return () => {
-      ro.disconnect();
-      window.removeEventListener('scroll', update, true);
-      window.removeEventListener('resize', update);
-    };
-  }, [containerRef]);
+  // Shared rAF tick + cached-rect positioning helper.
+  const { getRect, getDeviceOffsets } = useOverlayPositioning(containerRef);
 
   const el = containerRef.current;
   if (!el) return null;
-  const rect = rectRef.current ?? el.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
-  const canvasW = Math.round(rect.width * dpr);
-  const canvasH = Math.round(rect.height * dpr);
   const layout = officeState.getLayout();
-  const mapW = layout.cols * TILE_SIZE * zoom;
-  const mapH = layout.rows * TILE_SIZE * zoom;
-  const deviceOffsetX = Math.floor((canvasW - mapW) / 2) + Math.round(panRef.current.x);
-  const deviceOffsetY = Math.floor((canvasH - mapH) / 2) + Math.round(panRef.current.y);
+  let deviceOffsetX: number;
+  let deviceOffsetY: number;
+  if (getRect()) {
+    const off = getDeviceOffsets(dpr, zoom, layout, panRef.current.x, panRef.current.y, TILE_SIZE);
+    deviceOffsetX = off.deviceOffsetX;
+    deviceOffsetY = off.deviceOffsetY;
+  } else {
+    // First-paint fallback before ResizeObserver populates the cache.
+    const rect = el.getBoundingClientRect();
+    const canvasW = Math.round(rect.width * dpr);
+    const canvasH = Math.round(rect.height * dpr);
+    const mapW = layout.cols * TILE_SIZE * zoom;
+    const mapH = layout.rows * TILE_SIZE * zoom;
+    deviceOffsetX = Math.floor((canvasW - mapW) / 2) + Math.round(panRef.current.x);
+    deviceOffsetY = Math.floor((canvasH - mapH) / 2) + Math.round(panRef.current.y);
+  }
 
   const allIds = [...agents, ...subagentCharacters.map((s) => s.id)];
   const contextMax = getContextWindowMax();

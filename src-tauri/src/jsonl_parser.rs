@@ -5,26 +5,32 @@ use serde_json::Value;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum AgentEvent {
+    /// Tool invocation by the agent (e.g. Read, Bash, Edit).
     ToolUse {
         id: String,
         tool: String,
         input: Value,
     },
+    /// Result of a tool invocation, keyed by the originating `id`.
     ToolResult {
         id: String,
         content: Value,
         is_error: bool,
     },
+    /// Free-form assistant text — drives the `active` status.
     Text {
         content: String,
     },
+    /// Internal system event (turn_duration, init, etc.) with a subtype tag.
     System {
         subtype: String,
         data: Value,
     },
+    /// Unparsed line — kept for debugging, not surfaced to the frontend.
     Raw {
         raw: String,
     },
+    /// Token consumption snapshot emitted at the end of each turn.
     TokenUsage {
         input_tokens: u64,
         output_tokens: u64,

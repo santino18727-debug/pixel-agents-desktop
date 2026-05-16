@@ -89,6 +89,7 @@ fn focus_main_window(app: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Tauri application entry point — sets up logging, state, watchers, tray, hooks, and runs the event loop.
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tracing_subscriber::fmt()

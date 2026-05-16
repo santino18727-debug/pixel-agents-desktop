@@ -1,7 +1,8 @@
 //! Minimal HTTP server for Claude Code Hooks API.
 //!
-//! Listens on 127.0.0.1:17317 for POST /hook requests.
-//! Translates Claude Code hook payloads into frontend agent-event emissions.
+//! Listens on 127.0.0.1:17317 (or the next free port in 17317..=17326) for
+//! POST /hook requests. Translates Claude Code hook payloads into frontend
+//! agent-event emissions.
 //!
 //! Supported hook types:
 //!   PreToolUse    : { session_id, tool_name, tool_input }
@@ -20,7 +21,11 @@ use tracing::{info, warn};
 use crate::error::MutexExt;
 use crate::file_watcher::SessionAgentMap;
 
-const BIND_ADDR: &str = "127.0.0.1:17317";
+/// First port we try to bind. If busy we walk upward by `HOOK_PORT_RETRY`
+/// offsets so multiple instances of the app — or a previous instance that
+/// hasn't released the socket yet — don't kill the whole hooks integration.
+const HOOK_PORT_BASE: u16 = 17317;
+const HOOK_PORT_RETRY: u16 = 10;
 
 /// Constant-time string comparison to prevent timing attacks against the
 /// hook token. Always scans the full length of the shorter input even when
@@ -37,14 +42,16 @@ fn constant_time_eq(a: &str, b: &str) -> bool {
     diff == 0
 }
 
-/// Returns true if the Host header value is one of the expected local origins.
-/// This blocks DNS rebinding attacks where a remote page resolves an attacker
-/// domain to 127.0.0.1 to reach our localhost-bound server.
-fn is_valid_host(host: Option<&str>) -> bool {
-    matches!(
-        host,
-        Some("127.0.0.1:17317") | Some("localhost:17317")
-    )
+/// Returns true if the Host header value is one of the expected local origins
+/// for the given bound port. This blocks DNS rebinding attacks where a remote
+/// page resolves an attacker domain to 127.0.0.1 to reach our localhost-bound
+/// server. We accept only `127.0.0.1:<port>` and `localhost:<port>` for the
+/// exact port we are listening on.
+fn is_valid_host(host: Option<&str>, port: u16) -> bool {
+    let Some(h) = host else { return false };
+    let expected_ip = format!("127.0.0.1:{port}");
+    let expected_local = format!("localhost:{port}");
+    h == expected_ip || h == expected_local
 }
 
 /// Start the hooks HTTP server. Blocks the calling thread.
@@ -53,18 +60,63 @@ fn is_valid_host(host: Option<&str>) -> bool {
 /// expected_token must be present in the X-Hook-Token request header; requests
 /// without it are rejected with 401 to prevent local process injection attacks.
 pub fn start(app: AppHandle, session_agent_map: SessionAgentMap, expected_token: String) {
-    let listener = match TcpListener::bind(BIND_ADDR) {
-        Ok(l) => l,
-        Err(e) => {
-            // Log at error level — hooks won't work, user should know.
-            tracing::error!(
-                "hooks_server: failed to bind {BIND_ADDR}: {e}. \
-                 Check that no other process is using port 17317."
+    // Try HOOK_PORT_BASE first, then walk upward if the port is busy. This
+    // lets a second instance of the app (or a previous instance whose socket
+    // hasn't been released yet) still get a working hooks endpoint instead
+    // of disabling the integration entirely.
+    let mut bound: Option<(TcpListener, u16)> = None;
+    for offset in 0..HOOK_PORT_RETRY {
+        let port = HOOK_PORT_BASE + offset;
+        match TcpListener::bind(("127.0.0.1", port)) {
+            Ok(listener) => {
+                bound = Some((listener, port));
+                break;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+                warn!("hooks_server: port {port} busy ({e}), trying next");
+                continue;
+            }
+            Err(e) => {
+                warn!("hooks_server: bind error on port {port}: {e}");
+                continue;
+            }
+        }
+    }
+
+    let (listener, port) = match bound {
+        Some(b) => b,
+        None => {
+            warn!(
+                "hooks_server: all retry ports {}..={} busy — \
+                 Claude Code hooks integration disabled for this session",
+                HOOK_PORT_BASE,
+                HOOK_PORT_BASE + HOOK_PORT_RETRY - 1
             );
             return;
         }
     };
-    info!("hooks_server: listening on {BIND_ADDR}");
+    info!("hooks_server: listening on 127.0.0.1:{port}");
+
+    // Publish the bound port to ~/.pixel-agents/hook-port so external Claude
+    // Code hook configurations can discover where to POST. Analogous to how
+    // hook-token is written. Best-effort: a failure here just means consumers
+    // need to fall back to the default port.
+    if let Some(home) = dirs::home_dir() {
+        let dir = home.join(".pixel-agents");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            warn!("hooks_server: cannot create {}: {e}", dir.display());
+        } else {
+            let port_path = dir.join("hook-port");
+            if let Err(e) = std::fs::write(&port_path, port.to_string()) {
+                warn!(
+                    "hooks_server: cannot write {}: {e}",
+                    port_path.display()
+                );
+            }
+        }
+    } else {
+        warn!("hooks_server: cannot resolve home directory; hook-port file not written");
+    }
 
     for stream in listener.incoming() {
         match stream {
@@ -73,7 +125,7 @@ pub fn start(app: AppHandle, session_agent_map: SessionAgentMap, expected_token:
                 let map2 = Arc::clone(&session_agent_map);
                 let token = expected_token.clone();
                 std::thread::spawn(move || {
-                    handle_connection(stream, &app2, &map2, &token);
+                    handle_connection(stream, &app2, &map2, &token, port);
                 });
             }
             Err(e) => warn!("hooks_server: accept error: {e}"),
@@ -88,6 +140,7 @@ fn handle_connection(
     app: &AppHandle,
     session_agent_map: &SessionAgentMap,
     expected_token: &str,
+    bound_port: u16,
 ) {
     // 30-second read timeout prevents slow-loris style hangs.
     let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(30)));
@@ -135,7 +188,7 @@ fn handle_connection(
     }
 
     // Reject requests with an invalid Host header to defend against DNS rebinding.
-    if !is_valid_host(host_header.as_deref()) {
+    if !is_valid_host(host_header.as_deref(), bound_port) {
         warn!(
             "hooks_server: rejected request with invalid Host: {host_header:?}"
         );
@@ -284,16 +337,21 @@ mod tests {
 
     #[test]
     fn is_valid_host_accepts_expected() {
-        assert!(is_valid_host(Some("127.0.0.1:17317")));
-        assert!(is_valid_host(Some("localhost:17317")));
+        assert!(is_valid_host(Some("127.0.0.1:17317"), 17317));
+        assert!(is_valid_host(Some("localhost:17317"), 17317));
+        // Fallback port works too.
+        assert!(is_valid_host(Some("127.0.0.1:17320"), 17320));
+        assert!(is_valid_host(Some("localhost:17320"), 17320));
     }
 
     #[test]
     fn is_valid_host_rejects_others() {
-        assert!(!is_valid_host(None));
-        assert!(!is_valid_host(Some("evil.com:17317")));
-        assert!(!is_valid_host(Some("127.0.0.1:80")));
-        assert!(!is_valid_host(Some("0.0.0.0:17317")));
+        assert!(!is_valid_host(None, 17317));
+        assert!(!is_valid_host(Some("evil.com:17317"), 17317));
+        assert!(!is_valid_host(Some("127.0.0.1:80"), 17317));
+        assert!(!is_valid_host(Some("0.0.0.0:17317"), 17317));
+        // Port mismatch: we bound on 17318 but caller used 17317.
+        assert!(!is_valid_host(Some("127.0.0.1:17317"), 17318));
     }
 }
 
