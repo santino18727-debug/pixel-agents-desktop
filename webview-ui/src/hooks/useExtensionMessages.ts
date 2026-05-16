@@ -239,7 +239,9 @@ export function useExtensionMessages(
       setAgentTools((prev) => {
         const list = prev[id] || [];
         if (list.some((t) => t.toolId === toolId)) return prev;
-        return { ...prev, [id]: [...list, { toolId, status, done: false, permissionWait: permissionActive || false }] };
+        // Hard cap at 50 tools per agent to bound memory for long-running agents
+        // without a turn_duration event. Keeps most-recent entries.
+        return { ...prev, [id]: [...list, { toolId, status, done: false, permissionWait: permissionActive || false }].slice(-50) };
       });
       const effectiveToolName = toolName || extractToolName(rawStatus) || '';
       os.setAgentTool(id, effectiveToolName);

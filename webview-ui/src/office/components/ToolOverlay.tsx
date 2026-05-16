@@ -1,6 +1,6 @@
 // Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
 // Licensed under MIT
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import { Button } from '../../components/ui/Button.js';
 import {
@@ -68,17 +68,45 @@ export function ToolOverlay({
   const [, setTick] = useState(0);
   useEffect(() => {
     let rafId = 0;
-    const tick = () => {
-      setTick((n) => n + 1);
+    let lastTick = 0;
+    // Throttle re-renders to ~15 fps; overlays are static labels that just
+    // track sprite positions — the canvas sprites animate on their own rAF.
+    const TICK_INTERVAL_MS = 66;
+    const tick = (now: number) => {
+      if (now - lastTick >= TICK_INTERVAL_MS) {
+        setTick((n) => n + 1);
+        lastTick = now;
+      }
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
   }, []);
 
+  // Cache container rect; invalidate via ResizeObserver + scroll, so we
+  // don't force a synchronous reflow on every tick.
+  const rectRef = useRef<DOMRect | null>(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      rectRef.current = el.getBoundingClientRect();
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [containerRef]);
+
   const el = containerRef.current;
   if (!el) return null;
-  const rect = el.getBoundingClientRect();
+  const rect = rectRef.current ?? el.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const canvasW = Math.round(rect.width * dpr);
   const canvasH = Math.round(rect.height * dpr);

@@ -31,11 +31,31 @@ fn sprite_packs_root() -> Option<PathBuf> {
     dirs::home_dir().map(|h| h.join(".pixel-agents").join("sprites"))
 }
 
+/// Returns true if `child` resolves (after symlink-following canonicalization)
+/// to a path inside `root`. Used to defend against malicious sprite packs that
+/// embed symlinks pointing at arbitrary files like ~/.ssh/id_rsa, which a
+/// frontend canvas pixel-inspection could otherwise exfiltrate.
+fn path_is_within(root: &Path, child: &Path) -> bool {
+    match (root.canonicalize(), child.canonicalize()) {
+        (Ok(r), Ok(c)) => c.starts_with(&r),
+        _ => false,
+    }
+}
+
 /// Validates a manifest and returns SpritePackInfo if all required fields are present
 /// and at least one character_N.png exists on disk.
 fn validate_pack(dir: &Path) -> Option<SpritePackInfo> {
     let manifest_path = dir.join("manifest.json");
     if !manifest_path.is_file() {
+        return None;
+    }
+    // Defense in depth: ensure the manifest itself is not a symlink pointing
+    // outside the pack directory.
+    if !path_is_within(dir, &manifest_path) {
+        warn!(
+            "validate_pack: rejected manifest path traversal in {}",
+            dir.display()
+        );
         return None;
     }
     let content = std::fs::read_to_string(&manifest_path).ok()?;
@@ -59,11 +79,20 @@ fn validate_pack(dir: &Path) -> Option<SpritePackInfo> {
     }
 
     // Count character_N.png files on disk (N=0..63 to be generous).
+    // Reject any entries that resolve outside the pack dir (symlink traversal).
     let mut count = 0usize;
     for n in 0..64 {
         let p = dir.join(format!("character_{n}.png"));
         if p.is_file() {
-            count += 1;
+            if path_is_within(dir, &p) {
+                count += 1;
+            } else {
+                warn!(
+                    "validate_pack: pack {}: rejected path traversal {:?}",
+                    dir.display(),
+                    p
+                );
+            }
         }
     }
     if count == 0 && manifest.characters.is_empty() {
@@ -135,6 +164,14 @@ pub fn load_sprite_pack_impl(name: &str) -> Result<Value, String> {
                 for n in 0..64 {
                     let p = path.join(format!("character_{n}.png"));
                     if p.is_file() {
+                        if !path_is_within(&path, &p) {
+                            warn!(
+                                "load_sprite_pack: pack {}: rejected path traversal {:?}",
+                                path.display(),
+                                p
+                            );
+                            continue;
+                        }
                         characters.push(json!({
                             "id": format!("character_{n}"),
                             "path": p.to_string_lossy(),
@@ -189,8 +226,16 @@ pub fn scan_external_assets(dirs: Vec<String>) -> Value {
             match std::fs::read_dir(&furniture_dir) {
                 Ok(entries) => {
                     for entry in entries.flatten() {
-                        let manifest_path = entry.path().join("manifest.json");
+                        let entry_path = entry.path();
+                        let manifest_path = entry_path.join("manifest.json");
                         if manifest_path.is_file() {
+                            if !path_is_within(&entry_path, &manifest_path) {
+                                warn!(
+                                    "scan_external_assets: rejected path traversal {:?}",
+                                    manifest_path
+                                );
+                                continue;
+                            }
                             match std::fs::read_to_string(&manifest_path) {
                                 Ok(content) => match serde_json::from_str::<Value>(&content) {
                                     Ok(manifest) => catalog.push(manifest),
@@ -219,6 +264,13 @@ pub fn scan_external_assets(dirs: Vec<String>) -> Value {
             let sprite_name = format!("char_{n}.png");
             let sprite_path = dir.join(&sprite_name);
             if sprite_path.is_file() {
+                if !path_is_within(dir, &sprite_path) {
+                    warn!(
+                        "scan_external_assets: rejected sprite path traversal {:?}",
+                        sprite_path
+                    );
+                    continue;
+                }
                 let key = format!("char_{n}");
                 sprites.insert(key.clone(), json!(sprite_path.to_string_lossy()));
                 characters.push(json!({ "id": key, "path": sprite_path.to_string_lossy() }));

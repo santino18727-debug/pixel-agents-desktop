@@ -9,7 +9,7 @@ use notify::{RecursiveMode, Watcher};
 use notify_debouncer_full::{new_debouncer, DebouncedEvent};
 use serde_json::json;
 use tauri::{AppHandle, Emitter};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn};
 
 use crate::error::MutexExt;
 use crate::jsonl_parser::{parse_line, AgentEvent};
@@ -178,6 +178,7 @@ pub fn start_watcher(
         let app_expiry = app.clone();
         let s2a_expiry = Arc::clone(&session_to_agent);
         let cache_expiry = Arc::clone(&modified_cache);
+        let cancel_expiry = Arc::clone(&timer_cancel_map);
         std::thread::spawn(move || {
             const POLL_INTERVAL: Duration = Duration::from_secs(60);
             const MAX_AGE_SECS: u64 = 24 * 3600;
@@ -189,32 +190,63 @@ pub fn start_watcher(
                     .unwrap_or(0);
                 let cutoff = now_secs.saturating_sub(MAX_AGE_SECS);
 
-                // Read active session IDs from the cache (no disk I/O).
-                let active_ids: std::collections::HashSet<String> = {
+                // FIX 2: only expire sessions that are PRESENT in the cache
+                // with an old timestamp. Previously we expired any session
+                // missing from the active set, which incorrectly closed
+                // sessions at startup that hadn't yet been cache-inserted.
+                let expired_session_ids: Vec<String> = {
                     let cache = cache_expiry.lock_or_recover();
                     cache
                         .iter()
-                        .filter(|(_, &ts)| ts >= cutoff)
+                        .filter(|(_, &ts)| ts < cutoff)
                         .map(|(id, _)| id.clone())
                         .collect()
                 };
 
-                let mut map = s2a_expiry.lock_or_recover();
-                let expired: Vec<(String, usize)> = map
-                    .iter()
-                    .filter(|(sid, _)| !active_ids.contains(*sid))
-                    .map(|(k, &v)| (k.clone(), v))
-                    .collect();
+                if expired_session_ids.is_empty() {
+                    continue;
+                }
+
+                let expired: Vec<(String, usize)> = {
+                    let mut map = s2a_expiry.lock_or_recover();
+                    let mut out = Vec::new();
+                    for sid in &expired_session_ids {
+                        if let Some(aid) = map.remove(sid) {
+                            out.push((sid.clone(), aid));
+                        }
+                    }
+                    out
+                };
+
+                // FIX 5: clean up the other maps keyed by session_id / agent_id
+                // so they don't grow unbounded.
+                {
+                    let mut cache = cache_expiry.lock_or_recover();
+                    for (sid, _) in &expired {
+                        cache.remove(sid);
+                    }
+                }
+                {
+                    let mut cmap = cancel_expiry.lock_or_recover();
+                    for (_, aid) in &expired {
+                        if let Some(flag) = cmap.remove(aid) {
+                            flag.store(true, Ordering::SeqCst);
+                        }
+                    }
+                }
+                // tail_offsets is keyed by PathBuf, not session_id — we don't
+                // have the path here, so we let it persist (bounded by the
+                // number of distinct JSONL files seen, which is small).
+
                 let expired_ids: Vec<String> = expired.iter().map(|(id, _)| id.clone()).collect();
                 for (session_id, agent_id) in &expired {
-                    map.remove(session_id);
                     let msg = serde_json::json!({ "type": "agentClosed", "id": agent_id });
                     if let Err(e) = app_expiry.emit("agent-event", &msg) {
                         warn!("Failed to emit agentClosed for {session_id}: {e}");
                     }
                 }
+                info!("Expiry tick: closed {} idle session(s)", expired.len());
                 // Persist expiry: remove stale entries from session-map.json (I2).
-                drop(map);
                 session_map::remove_expired(&expired_ids);
             }
         });
@@ -540,19 +572,23 @@ fn process_jsonl_file(
         }
     };
 
+    // FIX 1 (TOCTOU): hold the `offsets` lock across the entire
+    // read-and-update sequence so two rapid notify events on the same path
+    // cannot read overlapping byte ranges and emit duplicate events.
+    // The lock is short-lived in practice (one bounded 512 KB read) and the
+    // few other call sites of `offsets` only briefly mutate the map.
     let mut offsets_guard = offsets.lock_or_recover();
-    let offset = offsets_guard.entry(path.clone()).or_insert(0);
+    let offset_entry = offsets_guard.entry(path.clone()).or_insert(0);
 
-    if current_len < *offset {
-        *offset = 0;
+    if current_len < *offset_entry {
+        *offset_entry = 0;
         if let Ok(sessions) = scan_projects() {
             let mut reg = registry.lock_or_recover();
             *reg = sessions;
         }
     }
 
-    let start = *offset;
-    drop(offsets_guard);
+    let start = *offset_entry;
 
     if file.seek(SeekFrom::Start(start)).is_err() {
         return;
@@ -587,11 +623,17 @@ fn process_jsonl_file(
         .take(complete_lines.len())
         .sum::<usize>() as u64;
 
-    {
-        let mut offsets_guard = offsets.lock_or_recover();
-        let offset = offsets_guard.entry(path.clone()).or_insert(start);
-        *offset = start + processed_bytes;
-    }
+    // Commit the new offset BEFORE dropping the guard so the next notify
+    // event cannot replay these same bytes.
+    *offset_entry = start + processed_bytes;
+    drop(offsets_guard);
+    debug!(
+        "process_jsonl_file: {} consumed {} bytes (from {} to {})",
+        path.display(),
+        processed_bytes,
+        start,
+        start + processed_bytes
+    );
 
     // Update the modified_secs cache for this session so the expiry thread
     // doesn't need to do a WalkDir scan.
@@ -623,17 +665,22 @@ fn process_jsonl_file(
         None
     };
 
-    let agent_id = {
+    // FIX 6: do disk I/O (session_map::save) and event emission OUTSIDE the
+    // session_to_agent lock so we don't block hooks_server::handle_connection
+    // or list_sessions during a write.
+    let (agent_id, pending_save, pending_emit): (
+        usize,
+        Option<HashMap<String, usize>>,
+        Option<serde_json::Value>,
+    ) = {
         let mut map = session_to_agent.lock_or_recover();
         if let Some(&id) = map.get(&session_id) {
-            id
+            (id, None, None)
         } else {
             let mut next_id = next_agent_id.lock_or_recover();
             let new_id = *next_id;
             *next_id += 1;
             map.insert(session_id.clone(), new_id);
-            // Persist updated map so new sessions survive restarts.
-            session_map::save(&map);
 
             let folder_name = path
                 .parent()
@@ -642,9 +689,7 @@ fn process_jsonl_file(
                 .unwrap_or("unknown")
                 .to_owned();
 
-            // Build agentCreated payload, enriched for sub-agents.
             let created_msg = if is_subagent_path {
-                // Resolve the parent's numeric agent_id from the session map.
                 let parent_agent_id = path_parent_sid
                     .as_deref()
                     .and_then(|psid| map.get(psid).copied());
@@ -657,8 +702,6 @@ fn process_jsonl_file(
                         "parentAgentId": paid,
                     })
                 } else {
-                    // Parent not yet registered — emit without parentAgentId
-                    // (agentTeamInfo will link them when SubagentInit is processed).
                     json!({
                         "type": "agentCreated",
                         "id": new_id,
@@ -674,13 +717,22 @@ fn process_jsonl_file(
                 })
             };
 
-            if let Err(e) = app.emit("agent-event", &created_msg) {
-                warn!("Failed to emit agentCreated: {e}");
-            }
-
-            new_id
+            // Snapshot the map for the save() call so we can drop the guard.
+            let snapshot = map.clone();
+            (new_id, Some(snapshot), Some(created_msg))
         }
+        // map guard dropped here
     };
+
+    if let Some(snapshot) = pending_save {
+        debug!("process_jsonl_file: persisting session map (no lock held)");
+        session_map::save(&snapshot);
+    }
+    if let Some(msg) = pending_emit {
+        if let Err(e) = app.emit("agent-event", &msg) {
+            warn!("Failed to emit agentCreated: {e}");
+        }
+    }
 
     for line in complete_lines {
         if let Some(parsed) = parse_line(&session_id, line) {

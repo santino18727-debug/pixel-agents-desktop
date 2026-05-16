@@ -181,8 +181,50 @@ pub fn run() {
             // so list_sessions can resolve the correct agent IDs for the frontend.
 
             // Generate a per-session token for the hooks server.
-            // Expose it as an env var so Claude Code hooks config can read it.
+            //
+            // Persist it to ~/.pixel-agents/hook-token with restrictive permissions
+            // (0600 on Unix; default-private inside %USERPROFILE% on Windows). This
+            // is the preferred source — env vars leak into every child process
+            // (explorer.exe, `open`, etc.) and on Linux are world-readable via
+            // /proc/<pid>/environ for the same UID.
+            //
+            // We ALSO set the env var for backward-compat with existing Claude Code
+            // hook configurations that read $PIXEL_AGENTS_HOOK_TOKEN. New configs
+            // should prefer reading the file.
             let hook_token = uuid::Uuid::new_v4().to_string();
+            if let Some(home) = dirs::home_dir() {
+                let dir = home.join(".pixel-agents");
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    tracing::warn!("hook-token: cannot create {}: {e}", dir.display());
+                } else {
+                    let token_path = dir.join("hook-token");
+                    match std::fs::write(&token_path, &hook_token) {
+                        Ok(()) => {
+                            #[cfg(unix)]
+                            {
+                                use std::os::unix::fs::PermissionsExt;
+                                if let Err(e) = std::fs::set_permissions(
+                                    &token_path,
+                                    std::fs::Permissions::from_mode(0o600),
+                                ) {
+                                    tracing::warn!(
+                                        "hook-token: cannot chmod 0600 on {}: {e}",
+                                        token_path.display()
+                                    );
+                                }
+                            }
+                        }
+                        Err(e) => tracing::warn!(
+                            "hook-token: cannot write {}: {e}",
+                            token_path.display()
+                        ),
+                    }
+                }
+            } else {
+                tracing::warn!(
+                    "hook-token: cannot resolve home directory; falling back to env var only"
+                );
+            }
             std::env::set_var("PIXEL_AGENTS_HOOK_TOKEN", &hook_token);
 
             // F3: Start the Claude Code Hooks API HTTP server.
@@ -226,7 +268,7 @@ pub fn run() {
                             let status =
                                 payload.get("status").and_then(|v| v.as_str()).unwrap_or("");
                             match status {
-                                "active" => tray::mark_active(&shared_tray_ev, aid),
+                                "active" => tray::mark_active(&tray_handle, &shared_tray_ev, aid),
                                 "waiting" => {
                                     notifier::notify_waiting(&tray_handle, aid);
                                 }
@@ -237,10 +279,10 @@ pub fn run() {
                             notifier::notify_permission(&tray_handle, aid);
                         }
                         ("agentCreated", Some(aid)) => {
-                            tray::mark_active(&shared_tray_ev, aid);
+                            tray::mark_active(&tray_handle, &shared_tray_ev, aid);
                         }
                         ("agentClosed", Some(aid)) => {
-                            tray::mark_inactive(&shared_tray_ev, aid);
+                            tray::mark_inactive(&tray_handle, &shared_tray_ev, aid);
                         }
                         _ => {}
                     }

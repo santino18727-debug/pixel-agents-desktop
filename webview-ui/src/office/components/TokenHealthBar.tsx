@@ -1,6 +1,6 @@
 // Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
 // Licensed under MIT
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 
 import {
   CHARACTER_SITTING_OFFSET_PX,
@@ -48,17 +48,44 @@ export function TokenHealthBar({
   const [, setTick] = useState(0);
   useEffect(() => {
     let rafId = 0;
-    const tick = () => {
-      setTick((n) => n + 1);
+    let lastTick = 0;
+    // Throttle to ~15 fps — bar position is just following sprites, no
+    // visual animation depends on a 60 fps re-render.
+    const TICK_INTERVAL_MS = 66;
+    const tick = (now: number) => {
+      if (now - lastTick >= TICK_INTERVAL_MS) {
+        setTick((n) => n + 1);
+        lastTick = now;
+      }
       rafId = requestAnimationFrame(tick);
     };
     rafId = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(rafId);
   }, []);
 
+  // Cache container rect; invalidate via ResizeObserver + scroll/resize.
+  const rectRef = useRef<DOMRect | null>(null);
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const update = () => {
+      rectRef.current = el.getBoundingClientRect();
+    };
+    update();
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    window.addEventListener('scroll', update, true);
+    window.addEventListener('resize', update);
+    return () => {
+      ro.disconnect();
+      window.removeEventListener('scroll', update, true);
+      window.removeEventListener('resize', update);
+    };
+  }, [containerRef]);
+
   const el = containerRef.current;
   if (!el) return null;
-  const rect = el.getBoundingClientRect();
+  const rect = rectRef.current ?? el.getBoundingClientRect();
   const dpr = window.devicePixelRatio || 1;
   const canvasW = Math.round(rect.width * dpr);
   const canvasH = Math.round(rect.height * dpr);

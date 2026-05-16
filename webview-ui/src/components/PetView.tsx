@@ -70,13 +70,27 @@ export function PetView() {
     };
   }, []);
 
-  // Subscribe to Tauri agent-event stream and maintain the active agent.
+  // Keep refs of the latest values so the listener effect below can be
+  // mounted exactly once. Re-subscribing on every activeAgentId change races
+  // with the async `await listen(...)` and can drop or duplicate events.
+  const activeAgentIdRef = useRef(activeAgentId);
   useEffect(() => {
-    let unlisten: (() => void) | undefined;
+    activeAgentIdRef.current = activeAgentId;
+  }, [activeAgentId]);
+  const urlAgentIdRef = useRef(urlAgentId);
+  useEffect(() => {
+    urlAgentIdRef.current = urlAgentId;
+  }, [urlAgentId]);
+
+  // Subscribe to Tauri agent-event stream and maintain the active agent.
+  // Mounted ONCE — reads current activeAgentId / urlAgentId via refs.
+  useEffect(() => {
+    let unlisten: () => void = () => {};
+    let cancelled = false;
     (async () => {
       try {
         const { listen } = await import('@tauri-apps/api/event');
-        unlisten = await listen<unknown>('agent-event', (event) => {
+        const fn = await listen<unknown>('agent-event', (event) => {
           const payload = event.payload as { type?: string; id?: number; status?: string; palette?: number; hueShift?: number };
           if (!payload || typeof payload.id !== 'number') return;
           const id = payload.id;
@@ -103,20 +117,23 @@ export function PetView() {
           agentsRef.current.set(id, existing);
 
           // Auto-select most-recently-active agent (unless URL pin is set).
-          if (urlAgentId === null) {
+          if (urlAgentIdRef.current === null) {
             const ordered = [...agentsRef.current.values()].sort((a, b) => b.lastSeen - a.lastSeen);
             const best = ordered.find((a) => a.lastSeen > 0) ?? ordered[0];
-            if (best && best.id !== activeAgentId) setActiveAgentId(best.id);
+            if (best && best.id !== activeAgentIdRef.current) setActiveAgentId(best.id);
           }
         });
+        if (cancelled) fn();
+        else unlisten = fn;
       } catch (e) {
         console.warn('[PetView] listen failed', e);
       }
     })();
     return () => {
-      if (unlisten) unlisten();
+      cancelled = true;
+      unlisten();
     };
-  }, [urlAgentId, activeAgentId]);
+  }, []);
 
   // If URL pinned, set the active id immediately.
   useEffect(() => {

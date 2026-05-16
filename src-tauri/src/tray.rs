@@ -117,34 +117,47 @@ pub fn build_tray(
     Ok(())
 }
 
-/// Mark an agent active and refresh the tray count item.
-pub fn mark_active(shared: &SharedTrayState, agent_id: usize) {
-    let guard = shared.lock_or_recover();
-    if let Some(state) = guard.as_ref() {
-        let mut set = state.active.lock_or_recover();
-        if set.insert(agent_id) {
-            let count = set.len();
-            drop(set);
-            if let Err(e) = state.count_item.set_text(format_count(count)) {
-                warn!("Failed to update tray count: {e}");
-            }
+/// Marshal `set_text` onto the main thread. Windows requires native menu
+/// mutations to happen on the GUI thread that owns the menu handle —
+/// calling `set_text` from a background thread (notify watcher, hooks
+/// server) can crash or no-op silently.
+fn update_count_text(app: &AppHandle, item: Arc<MenuItem<tauri::Wry>>, count: usize) {
+    let text = format_count(count);
+    if let Err(e) = app.run_on_main_thread(move || {
+        if let Err(e) = item.set_text(&text) {
+            warn!("Failed to update tray count: {e}");
         }
+    }) {
+        warn!("Failed to dispatch tray update to main thread: {e}");
     }
 }
 
-/// Mark an agent inactive (closed) and refresh the tray count item.
-pub fn mark_inactive(shared: &SharedTrayState, agent_id: usize) {
-    let guard = shared.lock_or_recover();
-    if let Some(state) = guard.as_ref() {
+/// Mark an agent active and refresh the tray count item.
+pub fn mark_active(app: &AppHandle, shared: &SharedTrayState, agent_id: usize) {
+    let (item, count) = {
+        let guard = shared.lock_or_recover();
+        let Some(state) = guard.as_ref() else { return };
         let mut set = state.active.lock_or_recover();
-        if set.remove(&agent_id) {
-            let count = set.len();
-            drop(set);
-            if let Err(e) = state.count_item.set_text(format_count(count)) {
-                warn!("Failed to update tray count: {e}");
-            }
+        if !set.insert(agent_id) {
+            return;
         }
-    }
+        (Arc::clone(&state.count_item), set.len())
+    };
+    update_count_text(app, item, count);
+}
+
+/// Mark an agent inactive (closed) and refresh the tray count item.
+pub fn mark_inactive(app: &AppHandle, shared: &SharedTrayState, agent_id: usize) {
+    let (item, count) = {
+        let guard = shared.lock_or_recover();
+        let Some(state) = guard.as_ref() else { return };
+        let mut set = state.active.lock_or_recover();
+        if !set.remove(&agent_id) {
+            return;
+        }
+        (Arc::clone(&state.count_item), set.len())
+    };
+    update_count_text(app, item, count);
 }
 
 fn format_count(n: usize) -> String {

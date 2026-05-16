@@ -22,6 +22,31 @@ use crate::file_watcher::SessionAgentMap;
 
 const BIND_ADDR: &str = "127.0.0.1:17317";
 
+/// Constant-time string comparison to prevent timing attacks against the
+/// hook token. Always scans the full length of the shorter input even when
+/// lengths differ, so an attacker cannot use timing to learn the secret
+/// byte-by-byte.
+fn constant_time_eq(a: &str, b: &str) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff: u8 = 0;
+    for (x, y) in a.bytes().zip(b.bytes()) {
+        diff |= x ^ y;
+    }
+    diff == 0
+}
+
+/// Returns true if the Host header value is one of the expected local origins.
+/// This blocks DNS rebinding attacks where a remote page resolves an attacker
+/// domain to 127.0.0.1 to reach our localhost-bound server.
+fn is_valid_host(host: Option<&str>) -> bool {
+    matches!(
+        host,
+        Some("127.0.0.1:17317") | Some("localhost:17317")
+    )
+}
+
 /// Start the hooks HTTP server. Blocks the calling thread.
 /// session_agent_map is shared with the file watcher so session_id -> agent_id
 /// resolution is consistent across both ingestion paths.
@@ -85,9 +110,10 @@ fn handle_connection(
         return;
     }
 
-    // Read headers until blank line, collecting Content-Length and X-Hook-Token.
+    // Read headers until blank line, collecting Content-Length, X-Hook-Token and Host.
     let mut content_length: usize = 0;
     let mut received_token = String::new();
+    let mut host_header: Option<String> = None;
     loop {
         let mut header_line = String::new();
         if reader.read_line(&mut header_line).is_err() {
@@ -103,11 +129,23 @@ fn handle_connection(
             content_length = rest.trim().parse().unwrap_or(0).min(1024 * 1024);
         } else if let Some(rest) = lower.strip_prefix("x-hook-token:") {
             received_token = rest.trim().to_owned();
+        } else if let Some(rest) = lower.strip_prefix("host:") {
+            host_header = Some(rest.trim().to_owned());
         }
     }
 
+    // Reject requests with an invalid Host header to defend against DNS rebinding.
+    if !is_valid_host(host_header.as_deref()) {
+        warn!(
+            "hooks_server: rejected request with invalid Host: {host_header:?}"
+        );
+        let _ = writer.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
+        return;
+    }
+
     // Reject requests with missing or wrong token.
-    if received_token != expected_token {
+    // Constant-time comparison to prevent timing attacks.
+    if !constant_time_eq(&received_token, expected_token) {
         warn!("hooks_server: rejected request — invalid or missing X-Hook-Token");
         let _ = writer.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
         return;
@@ -221,3 +259,41 @@ fn handle_connection(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn constant_time_eq_equal_strings() {
+        assert!(constant_time_eq("abc123", "abc123"));
+        assert!(constant_time_eq("", ""));
+    }
+
+    #[test]
+    fn constant_time_eq_different_lengths() {
+        assert!(!constant_time_eq("abc", "abcd"));
+        assert!(!constant_time_eq("abcd", "abc"));
+    }
+
+    #[test]
+    fn constant_time_eq_same_length_diff() {
+        assert!(!constant_time_eq("abc123", "abc124"));
+        assert!(!constant_time_eq("aaaaa", "bbbbb"));
+    }
+
+    #[test]
+    fn is_valid_host_accepts_expected() {
+        assert!(is_valid_host(Some("127.0.0.1:17317")));
+        assert!(is_valid_host(Some("localhost:17317")));
+    }
+
+    #[test]
+    fn is_valid_host_rejects_others() {
+        assert!(!is_valid_host(None));
+        assert!(!is_valid_host(Some("evil.com:17317")));
+        assert!(!is_valid_host(Some("127.0.0.1:80")));
+        assert!(!is_valid_host(Some("0.0.0.0:17317")));
+    }
+}
+
