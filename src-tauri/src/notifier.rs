@@ -40,13 +40,7 @@ pub fn notify_agent(app: &AppHandle, title: &str, body: &str) {
     if main_window_focused(app) {
         return;
     }
-    if let Err(e) = app
-        .notification()
-        .builder()
-        .title(title)
-        .body(body)
-        .show()
-    {
+    if let Err(e) = app.notification().builder().title(title).body(body).show() {
         warn!("Failed to show notification: {e}");
     }
 }

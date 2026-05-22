@@ -18,8 +18,7 @@ pub fn save_layout(layout: Value) -> Result<(), String> {
 
     // Create ~/.pixel-agents/ if it does not exist yet.
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .map_err(|e| format!("Failed to create directory: {e}"))?;
+        fs::create_dir_all(parent).map_err(|e| format!("Failed to create directory: {e}"))?;
     }
 
     let json = serde_json::to_string_pretty(&layout)
@@ -90,7 +89,10 @@ pub fn start_layout_watcher(app: AppHandle) {
             }
         };
 
-        if let Err(e) = debouncer.watcher().watch(&watch_dir, RecursiveMode::NonRecursive) {
+        if let Err(e) = debouncer
+            .watcher()
+            .watch(&watch_dir, RecursiveMode::NonRecursive)
+        {
             warn!("start_layout_watcher: failed to watch directory: {e}");
             return;
         }
@@ -108,9 +110,10 @@ pub fn start_layout_watcher(app: AppHandle) {
 
             // Only react to events touching layout.json specifically.
             let relevant = events.iter().any(|de| {
-                de.event.paths.iter().any(|p| {
-                    p.file_name().and_then(|n| n.to_str()) == Some("layout.json")
-                })
+                de.event
+                    .paths
+                    .iter()
+                    .any(|p| p.file_name().and_then(|n| n.to_str()) == Some("layout.json"))
             });
 
             if !relevant {

@@ -1,4 +1,4 @@
-﻿use std::path::PathBuf;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -122,7 +122,10 @@ pub fn scan_projects() -> Result<Vec<SessionMeta>> {
     Ok(sessions)
 }
 
-fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> Option<SessionMeta> {
+fn build_session_meta(
+    projects_root: &PathBuf,
+    jsonl_path: &std::path::Path,
+) -> Option<SessionMeta> {
     let session_id = jsonl_path.file_stem()?.to_str()?.to_owned();
 
     // Determine if this is a sub-agent by checking whether "subagents"
@@ -143,7 +146,13 @@ fn build_session_meta(projects_root: &PathBuf, jsonl_path: &std::path::Path) -> 
         components
             .iter()
             .position(|&c| c == "subagents")
-            .and_then(|idx| if idx > 0 { components.get(idx - 1).copied() } else { None })
+            .and_then(|idx| {
+                if idx > 0 {
+                    components.get(idx - 1).copied()
+                } else {
+                    None
+                }
+            })
             .map(str::to_owned)
     } else {
         None
@@ -225,7 +234,10 @@ mod tests {
         // Windows encoding: C:\Dev\pixel-agents-desktop -> C--Dev-pixel-agents-desktop
         // Claude Code uses -- for :\ and - for subsequent \
         // Best output: strip drive prefix, show path remainder.
-        assert_eq!(decode_folder_name("C--Dev-pixel-agents-desktop"), "Dev-pixel-agents-desktop");
+        assert_eq!(
+            decode_folder_name("C--Dev-pixel-agents-desktop"),
+            "Dev-pixel-agents-desktop"
+        );
     }
 
     #[test]
@@ -243,6 +255,9 @@ mod tests {
     #[test]
     fn decode_folder_name_station_math() {
         // C:\Dev\station-math-app -> C--Dev-station-math-app
-        assert_eq!(decode_folder_name("C--Dev-station-math-app"), "Dev-station-math-app");
+        assert_eq!(
+            decode_folder_name("C--Dev-station-math-app"),
+            "Dev-station-math-app"
+        );
     }
 }

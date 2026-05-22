@@ -153,8 +153,8 @@ pub fn run() {
                         event,
                         tauri::WindowEvent::Resized(_) | tauri::WindowEvent::Moved(_)
                     ) {
-                        let _ = save_handle
-                            .save_window_state(StateFlags::SIZE | StateFlags::POSITION);
+                        let _ =
+                            save_handle.save_window_state(StateFlags::SIZE | StateFlags::POSITION);
                     }
                 });
             }
@@ -215,10 +215,9 @@ pub fn run() {
                                 }
                             }
                         }
-                        Err(e) => tracing::warn!(
-                            "hook-token: cannot write {}: {e}",
-                            token_path.display()
-                        ),
+                        Err(e) => {
+                            tracing::warn!("hook-token: cannot write {}: {e}", token_path.display())
+                        }
                     }
                 }
             } else {
@@ -253,11 +252,10 @@ pub fn run() {
                 let tray_handle = app.handle().clone();
                 let shared_tray_ev = shared_tray.clone();
                 app.listen("agent-event", move |event| {
-                    let payload: serde_json::Value =
-                        match serde_json::from_str(event.payload()) {
-                            Ok(v) => v,
-                            Err(_) => return,
-                        };
+                    let payload: serde_json::Value = match serde_json::from_str(event.payload()) {
+                        Ok(v) => v,
+                        Err(_) => return,
+                    };
                     let evt_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("");
                     let id = payload
                         .get("id")

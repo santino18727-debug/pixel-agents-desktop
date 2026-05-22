@@ -91,7 +91,11 @@ pub fn start_watcher(
 
     {
         if let Ok(sessions) = scan_projects() {
-            let main_sessions: Vec<_> = sessions.iter().filter(|s| !s.is_subagent).cloned().collect();
+            let main_sessions: Vec<_> = sessions
+                .iter()
+                .filter(|s| !s.is_subagent)
+                .cloned()
+                .collect();
             let sub_sessions: Vec<_> = sessions.iter().filter(|s| s.is_subagent).cloned().collect();
 
             // Load persisted session → agent_id mapping so IDs are stable across restarts.
@@ -517,7 +521,10 @@ fn translate_to_frontend_messages(event: &AgentEvent, agent_id: usize) -> Vec<se
             })]
         }
         // P2: emit token usage so frontend can display consumption per agent.
-        AgentEvent::TokenUsage { input_tokens, output_tokens } => {
+        AgentEvent::TokenUsage {
+            input_tokens,
+            output_tokens,
+        } => {
             vec![json!({
                 "type": "agentTokenUsage",
                 "id": agent_id,
@@ -811,15 +818,14 @@ fn process_jsonl_file(
     for line in complete_lines {
         if let Some(parsed) = parse_line(&session_id, line) {
             // P3: handle SubagentInit - emit agentTeamInfo linking sub-agent to parent.
-            if let AgentEvent::SubagentInit { parent_session_id, .. } = &parsed.event {
-                let effective_parent = parent_session_id
-                    .as_deref()
-                    .or(path_parent_sid.as_deref());
+            if let AgentEvent::SubagentInit {
+                parent_session_id, ..
+            } = &parsed.event
+            {
+                let effective_parent = parent_session_id.as_deref().or(path_parent_sid.as_deref());
                 if let Some(parent_sid) = effective_parent {
-                    let parent_agent_id = session_to_agent
-                        .lock_or_recover()
-                        .get(parent_sid)
-                        .copied();
+                    let parent_agent_id =
+                        session_to_agent.lock_or_recover().get(parent_sid).copied();
                     if let Some(lead_id) = parent_agent_id {
                         let team_msg = json!({
                             "type": "agentTeamInfo",
@@ -893,10 +899,7 @@ mod tests {
     #[test]
     fn extract_timestamp_basic() {
         let line = r#"{"type":"x","timestamp":"2026-05-15T10:00:00.000Z","other":1}"#;
-        assert_eq!(
-            extract_timestamp(line),
-            Some("2026-05-15T10:00:00.000Z")
-        );
+        assert_eq!(extract_timestamp(line), Some("2026-05-15T10:00:00.000Z"));
     }
 
     #[test]
@@ -938,10 +941,8 @@ mod tests {
         let line_a = format!(r#"{{"type":"b","timestamp":"{}"}}"#, recent_a) + "\n";
         let line_b = format!(r#"{{"type":"c","timestamp":"{}"}}"#, recent_b) + "\n";
 
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-agents-replay-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pixel-agents-replay-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("seed_test.jsonl");
         {
@@ -967,14 +968,15 @@ mod tests {
 
     #[test]
     fn compute_replay_offset_empty_file_returns_zero() {
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-agents-replay-empty-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pixel-agents-replay-empty-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("empty.jsonl");
         std::fs::File::create(&path).unwrap();
-        assert_eq!(compute_replay_offset(&path, 0, Some("2000-01-01T00:00:00.000Z")), 0);
+        assert_eq!(
+            compute_replay_offset(&path, 0, Some("2000-01-01T00:00:00.000Z")),
+            0
+        );
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);
     }
@@ -982,10 +984,8 @@ mod tests {
     #[test]
     fn compute_replay_offset_all_old_returns_file_len() {
         use std::io::Write;
-        let dir = std::env::temp_dir().join(format!(
-            "pixel-agents-replay-allold-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("pixel-agents-replay-allold-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("all_old.jsonl");
         let line = "{\"timestamp\":\"2000-01-01T00:00:00.000Z\"}\n";

@@ -136,12 +136,10 @@ pub fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), S
         .store(STORE_FILE)
         .map_err(|e| format!("Failed to open store: {e}"))?;
 
-    let mut current: serde_json::Value = store
-        .get(SETTINGS_KEY)
-        .unwrap_or_else(|| {
-            serde_json::to_value(Settings::default())
-                .expect("Settings::default must always serialize to JSON")
-        });
+    let mut current: serde_json::Value = store.get(SETTINGS_KEY).unwrap_or_else(|| {
+        serde_json::to_value(Settings::default())
+            .expect("Settings::default must always serialize to JSON")
+    });
 
     if let (Some(obj), Some(patch)) = (current.as_object_mut(), settings.as_object()) {
         for (k, v) in patch {
@@ -159,7 +157,10 @@ pub fn set_settings(app: AppHandle, settings: serde_json::Value) -> Result<(), S
     // Apply alwaysOnTop immediately so the user sees the effect without restart.
     if let Some(win) = app.get_webview_window("main") {
         if let Err(e) = win.set_always_on_top(validated.always_on_top) {
-            warn!("Failed to apply always_on_top={}: {e}", validated.always_on_top);
+            warn!(
+                "Failed to apply always_on_top={}: {e}",
+                validated.always_on_top
+            );
         }
     }
 

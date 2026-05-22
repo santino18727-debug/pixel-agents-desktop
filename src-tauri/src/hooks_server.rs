@@ -108,10 +108,7 @@ pub fn start(app: AppHandle, session_agent_map: SessionAgentMap, expected_token:
         } else {
             let port_path = dir.join("hook-port");
             if let Err(e) = std::fs::write(&port_path, port.to_string()) {
-                warn!(
-                    "hooks_server: cannot write {}: {e}",
-                    port_path.display()
-                );
+                warn!("hooks_server: cannot write {}: {e}", port_path.display());
             }
         }
     } else {
@@ -189,9 +186,7 @@ fn handle_connection(
 
     // Reject requests with an invalid Host header to defend against DNS rebinding.
     if !is_valid_host(host_header.as_deref(), bound_port) {
-        warn!(
-            "hooks_server: rejected request with invalid Host: {host_header:?}"
-        );
+        warn!("hooks_server: rejected request with invalid Host: {host_header:?}");
         let _ = writer.write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\n\r\n");
         return;
     }
@@ -282,17 +277,12 @@ fn handle_connection(
                 "toolId": tool_id,
             }))
         }
-        "Stop" => {
-            Some(json!({
-                "type": "agentToolsClear",
-                "id": agent_id,
-            }))
-        }
+        "Stop" => Some(json!({
+            "type": "agentToolsClear",
+            "id": agent_id,
+        })),
         "Notification" => {
-            let _message = payload
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("");
+            let _message = payload.get("message").and_then(Value::as_str).unwrap_or("");
             // Map notification -> agentStatus active so the character animates.
             Some(json!({
                 "type": "agentStatus",
@@ -354,4 +344,3 @@ mod tests {
         assert!(!is_valid_host(Some("127.0.0.1:17317"), 17318));
     }
 }
-

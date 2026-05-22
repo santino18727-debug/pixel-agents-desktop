@@ -20,13 +20,16 @@ pub fn register(app: &AppHandle, shortcut_str: Option<&str>) {
         }
     };
 
-    if let Err(e) = app.global_shortcut().on_shortcut(shortcut, move |app, _sc, ev| {
-        // Fire on key press only (not release) to avoid double-toggling.
-        if ev.state() != ShortcutState::Pressed {
-            return;
-        }
-        toggle_main_window(app);
-    }) {
+    if let Err(e) = app
+        .global_shortcut()
+        .on_shortcut(shortcut, move |app, _sc, ev| {
+            // Fire on key press only (not release) to avoid double-toggling.
+            if ev.state() != ShortcutState::Pressed {
+                return;
+            }
+            toggle_main_window(app);
+        })
+    {
         warn!("Failed to register global shortcut: {e}");
     } else {
         info!("Registered global shortcut: {raw}");
@@ -34,7 +37,9 @@ pub fn register(app: &AppHandle, shortcut_str: Option<&str>) {
 }
 
 fn toggle_main_window(app: &AppHandle) {
-    let Some(win) = app.get_webview_window("main") else { return };
+    let Some(win) = app.get_webview_window("main") else {
+        return;
+    };
     let visible = win.is_visible().unwrap_or(false);
     let focused = win.is_focused().unwrap_or(false);
     if visible && focused {

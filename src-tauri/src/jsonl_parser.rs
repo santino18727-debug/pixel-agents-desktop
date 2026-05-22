@@ -1,4 +1,4 @@
-﻿use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// Parsed representation of a single JSONL agent event.
@@ -18,18 +18,11 @@ pub enum AgentEvent {
         is_error: bool,
     },
     /// Free-form assistant text — drives the `active` status.
-    Text {
-        content: String,
-    },
+    Text { content: String },
     /// Internal system event (turn_duration, init, etc.) with a subtype tag.
-    System {
-        subtype: String,
-        data: Value,
-    },
+    System { subtype: String, data: Value },
     /// Unparsed line — kept for debugging, not surfaced to the frontend.
-    Raw {
-        raw: String,
-    },
+    Raw { raw: String },
     /// Token consumption snapshot emitted at the end of each turn.
     TokenUsage {
         input_tokens: u64,
@@ -66,7 +59,9 @@ pub fn parse_line(session_id: &str, line: &str) -> Option<ParsedLine> {
 
 fn parse_event(line: &str) -> AgentEvent {
     let Ok(v) = serde_json::from_str::<Value>(line) else {
-        return AgentEvent::Raw { raw: line.to_owned() };
+        return AgentEvent::Raw {
+            raw: line.to_owned(),
+        };
     };
 
     let content_block = extract_content_block(&v);
@@ -101,7 +96,9 @@ fn parse_event(line: &str) -> AgentEvent {
         };
     }
 
-    AgentEvent::Raw { raw: line.to_owned() }
+    AgentEvent::Raw {
+        raw: line.to_owned(),
+    }
 }
 
 /// Extract a content block from a Claude Code JSONL envelope.
@@ -127,8 +124,14 @@ fn extract_content_block(v: &Value) -> Option<AgentEvent> {
             }
             // No actionable content -- fall back to token usage if present.
             if let Some(usage) = message.get("usage") {
-                let input = usage.get("input_tokens").and_then(Value::as_u64).unwrap_or(0);
-                let output = usage.get("output_tokens").and_then(Value::as_u64).unwrap_or(0);
+                let input = usage
+                    .get("input_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
+                let output = usage
+                    .get("output_tokens")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0);
                 if input > 0 || output > 0 {
                     return Some(AgentEvent::TokenUsage {
                         input_tokens: input,
@@ -174,8 +177,15 @@ fn extract_from_block(block: &Value) -> Option<AgentEvent> {
         "tool_result" => {
             let id = block.get("tool_use_id")?.as_str()?.to_owned();
             let content = block.get("content").cloned().unwrap_or(Value::Null);
-            let is_error = block.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-            Some(AgentEvent::ToolResult { id, content, is_error })
+            let is_error = block
+                .get("is_error")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            Some(AgentEvent::ToolResult {
+                id,
+                content,
+                is_error,
+            })
         }
         "text" => {
             let content = block.get("text")?.as_str()?.to_owned();
@@ -261,7 +271,8 @@ mod tests {
 
     #[test]
     fn attachment_line_becomes_raw() {
-        let line = r#"{"type":"attachment","attachment":{"type":"deferred_tools_delta"},"uuid":"abc"}"#;
+        let line =
+            r#"{"type":"attachment","attachment":{"type":"deferred_tools_delta"},"uuid":"abc"}"#;
         let parsed = parse_line("sess-1", line).unwrap();
         assert!(matches!(parsed.event, AgentEvent::Raw { .. }));
     }
@@ -282,7 +293,10 @@ mod tests {
         let line = r#"{"subtype":"init","session_id":"sub-abc","parent_session_id":"parent-xyz"}"#;
         let parsed = parse_line("sub-abc", line).expect("should parse");
         match parsed.event {
-            AgentEvent::SubagentInit { session_id, parent_session_id } => {
+            AgentEvent::SubagentInit {
+                session_id,
+                parent_session_id,
+            } => {
                 assert_eq!(session_id, "sub-abc");
                 assert_eq!(parent_session_id, Some("parent-xyz".to_owned()));
             }
@@ -295,7 +309,10 @@ mod tests {
         let line = r#"{"subtype":"init","session_id":"sub-abc"}"#;
         let parsed = parse_line("sub-abc", line).expect("should parse");
         match parsed.event {
-            AgentEvent::SubagentInit { session_id, parent_session_id } => {
+            AgentEvent::SubagentInit {
+                session_id,
+                parent_session_id,
+            } => {
                 assert_eq!(session_id, "sub-abc");
                 assert_eq!(parent_session_id, None);
             }
@@ -335,7 +352,10 @@ mod tests {
         let line = r#"{"type":"assistant","message":{"role":"assistant","content":[],"usage":{"input_tokens":200,"output_tokens":80}},"uuid":"abc"}"#;
         let parsed = parse_line("sess-1", line).expect("should parse");
         match parsed.event {
-            AgentEvent::TokenUsage { input_tokens, output_tokens } => {
+            AgentEvent::TokenUsage {
+                input_tokens,
+                output_tokens,
+            } => {
                 assert_eq!(input_tokens, 200);
                 assert_eq!(output_tokens, 80);
             }

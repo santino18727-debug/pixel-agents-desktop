@@ -246,7 +246,10 @@ pub fn scan_sprite_packs() -> Vec<SpritePackInfo> {
 pub fn load_sprite_pack_impl(folder_name: &str) -> Result<Value, String> {
     let root = sprite_packs_root().ok_or_else(|| "Cannot resolve home directory".to_owned())?;
     if !root.is_dir() {
-        return Err(format!("Sprite packs directory not found: {}", root.display()));
+        return Err(format!(
+            "Sprite packs directory not found: {}",
+            root.display()
+        ));
     }
 
     // Reject path-traversal attempts in the folder name (e.g. "../../etc").
