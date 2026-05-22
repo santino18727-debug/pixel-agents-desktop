@@ -28,9 +28,27 @@ Watch your Claude Code agents animate as pixel-art characters in a virtual offic
 
 Download the latest installer from [Releases](https://github.com/santino18727-debug/pixel-agents-desktop/releases) and run it:
 
-- Windows: `.msi`
+- Windows: `.msi` (enterprise) or `.exe` (NSIS, recommended)
 - macOS: `.dmg`
 - Linux: `.AppImage` or `.deb`
+
+### Windows SmartScreen warning
+
+The Windows binaries are **not code-signed** yet — this is a hobby project and a code-signing certificate costs a few hundred euros per year. When you run the installer, Windows SmartScreen will show:
+
+> **Windows protected your PC** — Microsoft Defender SmartScreen prevented an unrecognized app from starting.
+
+This is expected. To proceed:
+
+1. Click **More info**
+2. Click **Run anyway**
+
+If you'd rather verify the binary before running it, you can:
+
+- Check the SHA-256 hash against the one published on the [release page](https://github.com/santino18727-debug/pixel-agents-desktop/releases/latest)
+- Build from source yourself (see the [Development](#development) section)
+
+Code signing via Azure Trusted Signing is planned once the project stabilizes.
 
 ## Logs
 
