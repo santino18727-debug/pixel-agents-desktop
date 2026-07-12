@@ -4,6 +4,20 @@ Standalone desktop viewer for [Claude Code](https://claude.ai/code) sessions —
 
 Watch your Claude Code agents animate as pixel-art characters in a virtual office, without needing VS Code. It's a hobby tool, not a SaaS — have fun with it.
 
+## Screenshots
+
+Each active Claude Code session becomes a character at a desk, with a live label of what it's doing right now and a token-usage health bar above its head:
+
+![Pixel Agents office — animated agents at their desks with live tool labels](docs/media/office-agents.png)
+
+Token health bars (green → yellow → orange) show each agent's context-window usage at a glance:
+
+![Pixel Agents office — token-usage health bars above each character](docs/media/office-health-bars.png)
+
+When there are no sessions yet, the office guides you to launch one:
+
+![Empty state — prompt to launch an agent](docs/media/empty-state.png)
+
 ## Features
 
 - **Pixel-art office** with animated characters, one per active Claude Code agent
