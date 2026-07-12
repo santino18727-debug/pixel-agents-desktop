@@ -1,6 +1,6 @@
 // Based on pixel-agents by pablodelucca (https://github.com/pablodelucca/pixel-agents)
 // Licensed under MIT
-import { useState } from 'react';
+import { useId, useState } from 'react';
 
 import { useSpritePacks } from '../hooks/useSpritePacks.js';
 import { isSoundEnabled, setSoundEnabled } from '../notificationSound.js';
@@ -9,6 +9,18 @@ import { Button } from './ui/Button.js';
 import { Checkbox } from './ui/Checkbox.js';
 import { MenuItem } from './ui/MenuItem.js';
 import { Modal } from './ui/Modal.js';
+
+/** Grouping label + hairline divider for the settings list (a11y: real heading). */
+function SectionHeader({ children }: { children: string }) {
+  return (
+    <h3 className="text-2xs text-text-muted uppercase tracking-wider m-0 pt-8 pb-2 px-10 border-t border-border first:border-t-0 first:pt-2">
+      {children}
+    </h3>
+  );
+}
+
+/** Trailing chevron marking a row as an action (navigates / runs) vs. a toggle. */
+const ActionChevron = <span className="text-text-muted text-lg leading-none">›</span>;
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -66,6 +78,9 @@ export function SettingsModal({
   const [soundLocal, setSoundLocal] = useState(isSoundEnabled);
   const { packs: spritePacks, reload: reloadSpritePacks } = useSpritePacks();
   const selectedPack = spritePacks.find((p) => p.name === activeSpritePack) ?? null;
+  const contextSelectId = useId();
+  const contextInputId = useId();
+  const spritePackId = useId();
 
   const isPreset = CONTEXT_WINDOW_PRESETS.some((p) => p.value === contextWindowMax);
   const [isCustom, setIsCustom] = useState(!isPreset);
@@ -80,7 +95,9 @@ export function SettingsModal({
 
   return (
     <Modal isOpen={isOpen} onClose={onClose} title="Settings">
+      <SectionHeader>Actions</SectionHeader>
       <MenuItem
+        right={ActionChevron}
         onClick={() => {
           vscode.postMessage({ type: 'openSessionsFolder' });
           onClose();
@@ -89,6 +106,7 @@ export function SettingsModal({
         Open Sessions Folder
       </MenuItem>
       <MenuItem
+        right={ActionChevron}
         onClick={() => {
           vscode.postMessage({ type: 'exportLayout' });
           onClose();
@@ -97,6 +115,7 @@ export function SettingsModal({
         Export Layout
       </MenuItem>
       <MenuItem
+        right={ActionChevron}
         onClick={() => {
           vscode.postMessage({ type: 'importLayout' });
           onClose();
@@ -105,6 +124,7 @@ export function SettingsModal({
         Import Layout
       </MenuItem>
       <MenuItem
+        right={ActionChevron}
         onClick={() => {
           vscode.postMessage({ type: 'addExternalAssetDirectory' });
           onClose();
@@ -125,13 +145,17 @@ export function SettingsModal({
             size="sm"
             onClick={() => vscode.postMessage({ type: 'removeExternalAssetDirectory', path: dir })}
             className="shrink-0"
+            aria-label={`Remove asset directory ${dir}`}
           >
-            x
+            ×
           </Button>
         </div>
       ))}
+
+      <SectionHeader>Notifications</SectionHeader>
       <Checkbox
         label="Sound Notifications"
+        description="Play a sound when an agent needs your attention"
         checked={soundLocal}
         onChange={() => {
           const newVal = !isSoundEnabled();
@@ -141,28 +165,37 @@ export function SettingsModal({
         }}
       />
       <Checkbox
-        label="Watch All Sessions"
-        checked={watchAllSessions}
-        onChange={onToggleWatchAllSessions}
-      />
-      <Checkbox
-        label="Instant Detection (Hooks)"
-        checked={hooksEnabled}
-        onChange={onToggleHooksEnabled}
-      />
-      <Checkbox
         label="OS Notifications"
+        description="Show native desktop notifications"
         checked={notificationsEnabled}
         onChange={onToggleNotificationsEnabled}
       />
       <Checkbox
+        label="Instant Detection (Hooks)"
+        description="React in real-time via Claude Code hooks"
+        checked={hooksEnabled}
+        onChange={onToggleHooksEnabled}
+      />
+
+      <SectionHeader>Sessions &amp; Display</SectionHeader>
+      <Checkbox
+        label="Watch All Sessions"
+        description="Track every project, not just the current workspace"
+        checked={watchAllSessions}
+        onChange={onToggleWatchAllSessions}
+      />
+      <Checkbox
         label="Always Show Labels"
+        description="Keep agent name labels visible at all times"
         checked={alwaysShowOverlay}
         onChange={onToggleAlwaysShowOverlay}
       />
       <div className="flex flex-col py-4 px-10 gap-2">
-        <label className="text-left text-white">Context window size (tokens)</label>
+        <label htmlFor={contextSelectId} className="text-left text-white">
+          Context window size (tokens)
+        </label>
         <select
+          id={contextSelectId}
           className="bg-transparent border-2 border-white/50 text-white py-2 px-2 rounded-none focus:outline-none focus:border-accent"
           value={isCustom ? 'custom' : String(contextWindowMax)}
           onChange={(e) => {
@@ -188,6 +221,8 @@ export function SettingsModal({
         </select>
         {isCustom && (
           <input
+            id={contextInputId}
+            aria-label="Custom context window size in tokens"
             type="number"
             min={CONTEXT_WINDOW_MIN}
             max={CONTEXT_WINDOW_MAX}
@@ -210,17 +245,21 @@ export function SettingsModal({
       </div>
       <div className="flex flex-col py-4 px-10 gap-2">
         <div className="flex items-center justify-between">
-          <label className="text-left text-white">Sprite Pack</label>
+          <label htmlFor={spritePackId} className="text-left text-white">
+            Sprite Pack
+          </label>
           <Button
             variant="ghost"
             size="sm"
             onClick={reloadSpritePacks}
             title="Re-scan ~/.pixel-agents/sprites/"
+            aria-label="Re-scan sprite packs"
           >
             ↻
           </Button>
         </div>
         <select
+          id={spritePackId}
           className="bg-transparent border-2 border-white/50 text-white py-2 px-2 rounded-none focus:outline-none focus:border-accent"
           value={activeSpritePack ?? ''}
           onChange={(e) => {
@@ -260,7 +299,14 @@ export function SettingsModal({
           </span>
         )}
       </div>
-      <Checkbox label="Debug View" checked={isDebugMode} onChange={onToggleDebugMode} />
+
+      <SectionHeader>Advanced</SectionHeader>
+      <Checkbox
+        label="Debug View"
+        description="Show a raw list of agents and tool activity"
+        checked={isDebugMode}
+        onChange={onToggleDebugMode}
+      />
     </Modal>
   );
 }

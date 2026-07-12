@@ -29,13 +29,19 @@ export interface OverlayPositioning {
 
 export function useOverlayPositioning(
   containerRef: RefObject<HTMLElement | null>,
-  tickIntervalMs = 66,
+  { active = true, tickIntervalMs = 66 }: { active?: boolean; tickIntervalMs?: number } = {},
 ): OverlayPositioning {
   // rAF throttled tick — re-renders the overlay so it tracks sprite positions
   // without forcing a 60fps cycle (overlays are static labels above sprites
   // that animate independently on the canvas).
+  //
+  // The loop is gated on `active` (are there any characters to track?) and on
+  // document visibility, so an idle or minimized app doesn't burn CPU/battery
+  // spinning a re-render loop with nothing to position. It resumes on the next
+  // visibilitychange or when characters appear.
   const [tick, setTick] = useState(0);
   useEffect(() => {
+    if (!active) return;
     let rafId = 0;
     let lastTick = 0;
     const loop = (now: number) => {
@@ -45,9 +51,23 @@ export function useOverlayPositioning(
       }
       rafId = requestAnimationFrame(loop);
     };
-    rafId = requestAnimationFrame(loop);
-    return () => cancelAnimationFrame(rafId);
-  }, [tickIntervalMs]);
+    const start = () => {
+      if (rafId === 0 && !document.hidden) rafId = requestAnimationFrame(loop);
+    };
+    const stop = () => {
+      if (rafId !== 0) {
+        cancelAnimationFrame(rafId);
+        rafId = 0;
+      }
+    };
+    const onVisibility = () => (document.hidden ? stop() : start());
+    document.addEventListener('visibilitychange', onVisibility);
+    start();
+    return () => {
+      document.removeEventListener('visibilitychange', onVisibility);
+      stop();
+    };
+  }, [active, tickIntervalMs]);
 
   // Cached rect via ResizeObserver — avoids a synchronous reflow per tick.
   const rectRef = useRef<DOMRect | null>(null);

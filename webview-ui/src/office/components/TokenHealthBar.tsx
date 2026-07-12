@@ -44,8 +44,12 @@ export function TokenHealthBar({
   zoom,
   panRef,
 }: TokenHealthBarProps) {
-  // Shared rAF tick + cached-rect positioning helper.
-  const { getRect, getDeviceOffsets } = useOverlayPositioning(containerRef);
+  // Shared rAF tick + cached-rect positioning helper. Only tick while there
+  // are characters to track — an empty office needs no re-render loop.
+  const hasCharacters = agents.length > 0 || subagentCharacters.length > 0;
+  const { getRect, getDeviceOffsets } = useOverlayPositioning(containerRef, {
+    active: hasCharacters,
+  });
 
   const el = containerRef.current;
   if (!el) return null;
